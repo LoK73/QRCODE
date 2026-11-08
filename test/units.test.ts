@@ -6,25 +6,34 @@ import { parseWebhook, verifySignature } from "../src/whatsapp.js";
 import { applyReplacements, WordPressClient } from "../src/wordpress.js";
 
 describe("parseCommand", () => {
-  it("riconosce i comandi", () => {
-    assert.deepEqual(parseCommand("ok 12"), { type: "approve", id: 12 });
-    assert.deepEqual(parseCommand("OK #12"), { type: "approve", id: 12 });
-    assert.deepEqual(parseCommand("Confermo 3."), { type: "approve", id: 3 });
-    assert.deepEqual(parseCommand("ok"), { type: "approve", id: undefined });
-    assert.deepEqual(parseCommand("sì 4"), { type: "approve", id: 4 });
-    assert.deepEqual(parseCommand("annulla 7"), { type: "cancel", id: 7 });
-    assert.deepEqual(parseCommand("no 7"), { type: "cancel", id: 7 });
+  it("riconosce i comandi con il riferimento", () => {
+    assert.deepEqual(parseCommand("ok 12"), { type: "approve", id: 12, loose: false });
+    assert.deepEqual(parseCommand("OK #12"), { type: "approve", id: 12, loose: false });
+    assert.deepEqual(parseCommand("ok rif. 12"), { type: "approve", id: 12, loose: false });
+    assert.deepEqual(parseCommand("Confermo 3."), { type: "approve", id: 3, loose: false });
+    assert.deepEqual(parseCommand("sì 4"), { type: "approve", id: 4, loose: false });
+    assert.deepEqual(parseCommand("annulla 7"), { type: "cancel", id: 7, loose: false });
+    assert.deepEqual(parseCommand("no 7"), { type: "cancel", id: 7, loose: false });
     assert.deepEqual(parseCommand("ripristina 5"), { type: "revert", id: 5 });
     assert.deepEqual(parseCommand("stato 5"), { type: "status", id: 5 });
     assert.deepEqual(parseCommand("commesse"), { type: "list" });
     assert.deepEqual(parseCommand("aiuto"), { type: "help" });
   });
 
+  it("riconosce le conferme naturali come 'loose'", () => {
+    for (const t of ["ok", "Sì vai", "si, procedi pure!", "vai pure 👍", "perfetto, vai", "va bene", "sì"]) {
+      assert.deepEqual(parseCommand(t), { type: "approve", loose: true }, t);
+    }
+    for (const t of ["lascia perdere", "no, aspetta", "annulla"]) {
+      assert.deepEqual(parseCommand(t), { type: "cancel", loose: true }, t);
+    }
+  });
+
   it("non scambia la conversazione per comandi", () => {
     assert.equal(parseCommand("no"), undefined);
-    assert.equal(parseCommand("sì"), undefined);
     assert.equal(parseCommand("ok ma prima controlla il prezzo"), undefined);
     assert.equal(parseCommand("Parigi ora costa 590€"), undefined);
+    assert.equal(parseCommand("sì ma domani"), undefined);
   });
 });
 

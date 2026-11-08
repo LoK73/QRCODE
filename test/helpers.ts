@@ -61,8 +61,8 @@ export class FakeSite implements SiteEditor {
 
 export const PRICE_CHANGE: Interpretation = {
   kind: "commessa",
-  summary: "Aggiornare il prezzo del tour di Parigi a 590€",
-  details: ["Prezzo: 650€ → 590€"],
+  summary: "Cambio il prezzo del tour di Parigi di maggio",
+  details: ["prezzo 650€ → 590€"],
   operations: [
     {
       type: "update_post",

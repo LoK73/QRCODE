@@ -1,7 +1,7 @@
 import { errorMessage, type Interpreter } from "./ai.js";
 import { parseCommand, type Command } from "./commands.js";
 import type { Operation } from "./operations.js";
-import type { Commessa, Store } from "./store.js";
+import type { ChatMessage, Commessa, Store } from "./store.js";
 import type { AppliedOperation, UndoStep } from "./wordpress.js";
 import type { IncomingMessage } from "./whatsapp.js";
 
@@ -26,6 +26,9 @@ type Chat = Pick<IncomingMessage, "chatId" | "chatType">;
 /**
  * Il cuore del bot: riceve i messaggi, riconosce i comandi, fa interpretare
  * le richieste all'AI, registra le commesse e le applica dopo l'approvazione.
+ *
+ * I testi sono scritti in tono colloquiale, come li scriverebbe un collega,
+ * ma il bot non si spaccia per una persona: se glielo chiedono, lo dice.
  */
 export class Bot {
   constructor(
@@ -57,7 +60,7 @@ export class Bot {
     });
 
     const command = parseCommand(msg.text);
-    if (command) {
+    if (command && this.acceptCommand(command, msg, history)) {
       await this.handleCommand(command, msg);
       return;
     }
@@ -72,36 +75,56 @@ export class Bot {
     await this.handleRequest(msg, text, history);
   }
 
+  /**
+   * Le conferme "naturali" senza numero ("sì vai", "procedi", "lascia perdere")
+   * valgono solo se l'ultimo messaggio del bot è la proposta di una commessa
+   * ancora in attesa e chi scrive può decidere. Altrimenti sono conversazione.
+   */
+  private acceptCommand(cmd: Command, msg: IncomingMessage, history: ChatMessage[]): boolean {
+    if (!("loose" in cmd) || !cmd.loose) return true;
+    const lastBot = [...history].reverse().find((m) => m.bot);
+    if (!lastBot) return false;
+    const pending = this.store.list(msg.chatId, ["in_attesa"]);
+    const proposed = pending.find((c) => lastBot.text.includes(refTag(c.id)));
+    if (!proposed) return false;
+    if (cmd.type === "approve") return this.isApprover(msg.from);
+    return pending.some((c) => c.requesterId === msg.from) || this.isApprover(msg.from);
+  }
+
   // ------------------------------------------------------------ richieste
 
-  private async handleRequest(msg: IncomingMessage, text: string, history: ReturnType<Store["recentMessages"]>) {
+  private async handleRequest(msg: IncomingMessage, text: string, history: ChatMessage[]) {
     let result;
     try {
       result = await this.interpreter.interpret({ text, senderName: msg.fromName, history });
     } catch (err) {
       console.error("[bot] errore AI:", err);
-      await this.reply(msg, `⚠️ Non sono riuscito a elaborare la richiesta (${errorMessage(err)}). Riprova tra poco.`);
+      await this.reply(msg, "Scusate, in questo momento non riesco a guardarci. Me lo riscrivete tra un po'?");
       return;
     }
 
-    if (result.kind === "ignora") return;
-
-    if (result.kind === "chiarimento") {
-      await this.reply(msg, `❓ ${result.question ?? result.summary}`);
-      return;
+    switch (result.kind) {
+      case "ignora":
+        return;
+      case "chiarimento":
+        return this.reply(msg, result.question ?? result.summary);
+      case "risposta":
+        if (result.reply) await this.reply(msg, result.reply);
+        return;
+      case "commessa": {
+        const commessa = this.store.createCommessa({
+          chatId: msg.chatId,
+          chatType: msg.chatType,
+          requesterId: msg.from,
+          requesterName: msg.fromName,
+          originalText: text,
+          summary: result.summary,
+          details: result.details ?? [],
+          operations: result.operations ?? [],
+        });
+        return this.reply(msg, formatProposal(commessa));
+      }
     }
-
-    const commessa = this.store.createCommessa({
-      chatId: msg.chatId,
-      chatType: msg.chatType,
-      requesterId: msg.from,
-      requesterName: msg.fromName,
-      originalText: text,
-      summary: result.summary,
-      details: result.details ?? [],
-      operations: result.operations ?? [],
-    });
-    await this.reply(msg, formatProposal(commessa));
   }
 
   // ------------------------------------------------------------ comandi
@@ -114,7 +137,7 @@ export class Bot {
         return this.reply(msg, this.formatList(msg.chatId));
       case "status": {
         const c = this.findVisible(cmd.id, msg);
-        return this.reply(msg, c ? formatStatus(c) : `Commessa #${cmd.id} non trovata.`);
+        return this.reply(msg, c ? formatStatus(c) : `Non trovo niente con rif. ${cmd.id}.`);
       }
       case "approve":
         return this.approve(cmd.id, msg);
@@ -127,16 +150,15 @@ export class Bot {
 
   private async approve(id: number | undefined, msg: IncomingMessage): Promise<void> {
     if (!this.isApprover(msg.from)) {
-      return this.reply(msg, "⛔ Solo i responsabili autorizzati possono approvare le commesse.");
+      return this.reply(msg, "Per questa aspetto l'ok di un responsabile prima di procedere.");
     }
     const c = this.resolvePending(id, msg);
     if (typeof c === "string") return this.reply(msg, c);
 
     // Passaggio atomico in_attesa → in_corso: un secondo "ok" non riapplica la commessa.
     if (!this.store.transition(c.id, "in_attesa", "in_corso", { approvedBy: msg.from })) {
-      return this.reply(msg, `La commessa #${c.id} non è più in attesa (stato: ${this.store.get(c.id)?.status}).`);
+      return this.reply(msg, `Quella (rif. ${c.id}) è già stata gestita.`);
     }
-    await this.reply(msg, `⏳ Commessa #${c.id} approvata, aggiorno il sito…`);
 
     const applied: AppliedOperation[] = [];
     try {
@@ -148,26 +170,23 @@ export class Bot {
       console.error(`[bot] errore applicando la commessa #${c.id}:`, err);
       const rollbackErrors = await this.undoAll(applied.map((a) => a.undo));
       this.store.transition(c.id, "in_corso", "errore", { error: reason });
-      const note = applied.length
-        ? rollbackErrors.length
-          ? `\n⚠️ Ripristino parziale non riuscito: ${rollbackErrors.join("; ")}. Controlla il sito.`
-          : "\nLe modifiche già fatte sono state ripristinate."
-        : "";
-      // L'errore va comunque in chat: se la notifica fallisce, resta nei log.
-      await this.notify(c, `❌ Commessa #${c.id} non completata: ${reason}${note}`);
+      let text = `Non sono riuscito a fare la modifica sul sito: ${reason}`;
+      if (applied.length) {
+        text += rollbackErrors.length
+          ? `\nAttenzione: una parte era già cambiata e non sono riuscito a rimetterla com'era (${rollbackErrors.join("; ")}), va controllata a mano.`
+          : "\nHo rimesso com'era la parte che avevo già cambiato.";
+      }
+      // L'esito è già salvato: se la notifica fallisce, resta nei log.
+      await this.notify(c, `${text} (rif. ${c.id})`);
       return;
     }
 
+    const urls = [...new Set(applied.map((a) => a.url).filter(Boolean))];
     this.store.transition(c.id, "in_corso", "completata", {
-      resultUrls: [...new Set(applied.map((a) => a.url).filter(Boolean))],
+      resultUrls: urls,
       undo: applied.map((a) => a.undo),
     });
-    const lines = [
-      `✅ Commessa #${c.id} completata`,
-      ...applied.map((a) => `• ${a.description}${a.url ? `\n  ${a.url}` : ""}`),
-      "",
-      `Per tornare indietro: *ripristina ${c.id}*`,
-    ];
+    const lines = [urls.length ? `Fatto, è online (rif. ${c.id}):` : `Fatto (rif. ${c.id}).`, ...urls];
     await this.notify(c, lines.join("\n"));
   }
 
@@ -175,34 +194,34 @@ export class Bot {
     const c = this.resolvePending(id, msg);
     if (typeof c === "string") return this.reply(msg, c);
     if (c.requesterId !== msg.from && !this.isApprover(msg.from)) {
-      return this.reply(msg, "⛔ Può annullare la commessa solo chi l'ha chiesta o un responsabile.");
+      return this.reply(msg, "Questa la può annullare chi l'ha chiesta o un responsabile.");
     }
     if (!this.store.transition(c.id, "in_attesa", "annullata")) {
-      return this.reply(msg, `La commessa #${c.id} non è più in attesa.`);
+      return this.reply(msg, `Quella (rif. ${c.id}) è già stata gestita.`);
     }
-    await this.notify(c, `🗑️ Commessa #${c.id} annullata.`);
+    await this.notify(c, `Ok, lascio perdere (rif. ${c.id}).`);
   }
 
   private async revert(id: number, msg: IncomingMessage): Promise<void> {
     if (!this.isApprover(msg.from)) {
-      return this.reply(msg, "⛔ Solo i responsabili autorizzati possono ripristinare le modifiche.");
+      return this.reply(msg, "Per tornare indietro serve l'ok di un responsabile.");
     }
     const c = this.findVisible(id, msg);
-    if (!c) return this.reply(msg, `Commessa #${id} non trovata.`);
+    if (!c) return this.reply(msg, `Non trovo niente con rif. ${id}.`);
     if (c.status !== "completata") {
-      return this.reply(msg, `Si possono ripristinare solo commesse completate (la #${id} è "${c.status}").`);
+      return this.reply(msg, `Quella (rif. ${id}) non era stata messa online, non c'è niente da ripristinare.`);
     }
     if (!this.store.transition(c.id, "completata", "in_corso")) {
-      return this.reply(msg, `La commessa #${id} è già in lavorazione.`);
+      return this.reply(msg, `Ci sto già lavorando (rif. ${id}).`);
     }
     const errors = await this.undoAll(c.undo);
     if (errors.length) {
       this.store.transition(c.id, "in_corso", "completata");
-      await this.notify(c, `❌ Ripristino della commessa #${id} non riuscito: ${errors.join("; ")}`);
+      await this.notify(c, `Non sono riuscito a rimettere com'era: ${errors.join("; ")} (rif. ${id})`);
       return;
     }
     this.store.transition(c.id, "in_corso", "ripristinata");
-    await this.notify(c, `↩️ Modifiche della commessa #${id} annullate: il sito è tornato com'era prima.`);
+    await this.notify(c, `Fatto, ho rimesso com'era prima (rif. ${id}).`);
   }
 
   // ------------------------------------------------------------ helper
@@ -224,14 +243,15 @@ export class Bot {
   private resolvePending(id: number | undefined, msg: IncomingMessage): Commessa | string {
     if (id !== undefined) {
       const c = this.findVisible(id, msg);
-      if (!c) return `Commessa #${id} non trovata.`;
-      if (c.status !== "in_attesa") return `La commessa #${id} non è in attesa (stato: ${c.status}).`;
+      if (!c) return `Non trovo niente con rif. ${id}.`;
+      if (c.status !== "in_attesa") return `Quella (rif. ${id}) è già stata gestita.`;
       return c;
     }
     const pending = this.store.list(msg.chatId, ["in_attesa"]);
-    if (pending.length === 0) return "Non ci sono commesse in attesa.";
+    if (pending.length === 0) return "Non ho niente in sospeso al momento.";
     if (pending.length > 1) {
-      return `Ci sono ${pending.length} commesse in attesa (${pending.map((p) => `#${p.id}`).join(", ")}): indica il numero, es. *ok ${pending[0].id}*.`;
+      const refs = pending.map((p) => p.id).reverse();
+      return `Ne ho ${pending.length} in sospeso (rif. ${refs.join(", ")}), quale? Scrivetemi tipo "ok ${refs[0]}".`;
     }
     return pending[0];
   }
@@ -247,14 +267,14 @@ export class Bot {
   private formatList(chatId: string): string {
     const open = this.store.list(chatId, ["in_attesa", "in_corso"]);
     const recent = this.store.list(chatId, ["completata", "errore", "ripristinata"], 5);
-    if (!open.length && !recent.length) return "Nessuna commessa per questa chat.";
+    if (!open.length && !recent.length) return "Per ora niente.";
     const lines: string[] = [];
     if (open.length) {
-      lines.push("*Commesse aperte*", ...open.map((c) => `• #${c.id} ${STATUS_LABEL[c.status]} – ${c.summary}`));
+      lines.push("In sospeso:", ...open.map((c) => `- rif. ${c.id}: ${c.summary} (${STATUS_LABEL[c.status]})`));
     }
     if (recent.length) {
       if (lines.length) lines.push("");
-      lines.push("*Ultime chiuse*", ...recent.map((c) => `• #${c.id} ${STATUS_LABEL[c.status]} – ${c.summary}`));
+      lines.push("Ultime:", ...recent.map((c) => `- rif. ${c.id}: ${c.summary} (${STATUS_LABEL[c.status]})`));
     }
     return lines.join("\n");
   }
@@ -287,45 +307,50 @@ export class Bot {
 // ------------------------------------------------------------ testi
 
 const STATUS_LABEL: Record<Commessa["status"], string> = {
-  in_attesa: "🕒 in attesa",
-  in_corso: "⏳ in corso",
-  completata: "✅ completata",
-  errore: "❌ errore",
-  annullata: "🗑️ annullata",
-  ripristinata: "↩️ ripristinata",
+  in_attesa: "aspetto l'ok",
+  in_corso: "ci sto lavorando",
+  completata: "fatta",
+  errore: "non riuscita",
+  annullata: "annullata",
+  ripristinata: "rimessa com'era",
 };
 
+/** Il riferimento con cui il bot cita una commessa nei messaggi. */
+export function refTag(id: number): string {
+  return `(rif. ${id})`;
+}
+
 export function formatProposal(c: Commessa): string {
-  const lines = [`📋 *Commessa #${c.id}*`, c.summary];
-  if (c.details.length) lines.push("", ...c.details.map((d) => `• ${d}`));
-  lines.push("", `Per applicarla: *ok ${c.id}*`, `Per scartarla: *annulla ${c.id}*`);
+  const summary = c.summary.replace(/[.\s]+$/, "");
+  const lines = c.details.length ? [`${summary}:`, ...c.details.map((d) => `- ${d}`)] : [`${summary}.`];
+  lines.push(`Mi date l'ok e procedo? ${refTag(c.id)}`);
   return lines.join("\n");
 }
 
 function formatStatus(c: Commessa): string {
+  const when = new Date(c.createdAt).toLocaleString("it-IT", {
+    timeZone: "Europe/Rome",
+    dateStyle: "short",
+    timeStyle: "short",
+  });
   const lines = [
-    `📋 *Commessa #${c.id}* – ${STATUS_LABEL[c.status]}`,
+    `Rif. ${c.id} – ${STATUS_LABEL[c.status]}`,
     c.summary,
-    ...c.details.map((d) => `• ${d}`),
-    `Richiesta da: ${c.requesterName ?? c.requesterId} il ${new Date(c.createdAt).toLocaleString("it-IT", { timeZone: "Europe/Rome" })}`,
+    ...c.details.map((d) => `- ${d}`),
+    `Chiesta da ${c.requesterName ?? c.requesterId} il ${when}`,
   ];
-  if (c.approvedBy) lines.push(`Approvata da: ${c.approvedBy}`);
   if (c.resultUrls.length) lines.push(...c.resultUrls);
-  if (c.error) lines.push(`Errore: ${c.error}`);
+  if (c.error) lines.push(`Problema: ${c.error}`);
   return lines.join("\n");
 }
 
-const HELP_TEXT = `🤖 *Come funziono*
-Scrivete nel gruppo cosa va cambiato sul sito, ad esempio:
-• "Il tour di Parigi di maggio ora costa 590€"
-• "Togliete la crociera in Grecia, è sold out"
-• "Nuova offerta: weekend a Vienna, 3 notti da 349€"
+const HELP_TEXT = `Scrivetemi qui le modifiche da fare al sito, anche a parole vostre (es. "Parigi di maggio ora costa 590", "togliete la crociera in Grecia che è sold out"). Vi riscrivo cosa cambio e quando un responsabile dà l'ok la metto online.
 
-Preparo una commessa con il riepilogo; quando un responsabile risponde *ok <numero>*, la applico al sito.
+Se vi serve:
+- ok 12 → conferma
+- annulla 12 → lascia perdere
+- ripristina 12 → rimette com'era
+- stato 12 → a che punto è
+- commesse → cosa c'è in sospeso
 
-*Comandi*
-• ok 12 – approva e applica la commessa 12
-• annulla 12 – scarta la commessa 12
-• ripristina 12 – annulla sul sito le modifiche della 12
-• stato 12 – dettagli della commessa
-• commesse – elenco delle commesse`;
+Sono un assistente automatico: le modifiche le faccio io, ma passano sempre dall'ok di un responsabile.`;

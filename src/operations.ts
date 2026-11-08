@@ -73,19 +73,24 @@ export type UpdateProductPriceOp = z.infer<typeof UpdateProductPriceOp>;
 /** Risultato dell'interpretazione di un messaggio da parte dell'AI. */
 export const Interpretation = z.object({
   kind: z
-    .enum(["commessa", "chiarimento", "ignora"])
+    .enum(["commessa", "chiarimento", "risposta", "ignora"])
     .describe(
       "'commessa' = richiesta di modifica al sito pronta da proporre; " +
         "'chiarimento' = è una richiesta ma serve una domanda per completarla; " +
-        "'ignora' = il messaggio non è una richiesta per il sito",
+        "'risposta' = messaggio rivolto a te che merita una breve risposta ma non è una modifica al sito; " +
+        "'ignora' = conversazione tra colleghi che non ti riguarda",
     ),
   summary: z
     .string()
-    .describe("Riepilogo breve in italiano di cosa verrà fatto (per 'commessa') o del perché si ignora"),
+    .describe(
+      "Per 'commessa': cosa farai, in prima persona e al presente, come lo scriverebbe un collega " +
+        "(es. 'Cambio il prezzo del tour di Parigi di maggio'). Per gli altri casi: nota interna breve.",
+    ),
   question: z
     .string()
     .optional()
-    .describe("Per 'chiarimento': la domanda da fare nel gruppo"),
+    .describe("Per 'chiarimento': la domanda da fare nel gruppo, breve e colloquiale"),
+  reply: z.string().optional().describe("Per 'risposta': il testo da scrivere nel gruppo, breve e colloquiale"),
   operations: z
     .array(Operation)
     .optional()
@@ -93,7 +98,7 @@ export const Interpretation = z.object({
   details: z
     .array(z.string())
     .optional()
-    .describe("Per 'commessa': elenco puntato leggibile dei cambiamenti (prima → dopo)"),
+    .describe("Per 'commessa': i cambiamenti in forma 'prima → dopo', brevi (es. 'prezzo 650€ → 590€')"),
 });
 
 export type Interpretation = z.infer<typeof Interpretation>;

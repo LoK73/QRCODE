@@ -5,19 +5,28 @@ Il bot capisce la richiesta, trova la pagina giusta su WordPress, propone una **
 riepilogo delle modifiche e la applica al sito **solo dopo l'OK di un responsabile**.
 
 ```
-Marco:  Il tour di Parigi di maggio ora costa 590€ invece di 650
-Bot:    📋 Commessa #12
-        Aggiornare il prezzo del "Tour di Parigi – Maggio" a 590€
-        • Prezzo: 650€ → 590€
-        Per applicarla: ok 12
-        Per scartarla: annulla 12
-Giulia: ok 12
-Bot:    ⏳ Commessa #12 approvata, aggiorno il sito…
-Bot:    ✅ Commessa #12 completata
-        • Aggiornato "Tour di Parigi – Maggio" (content)
-          https://www.tua-agenzia.it/tour-parigi-maggio
-        Per tornare indietro: ripristina 12
+Marco:  Il tour di Parigi di maggio ora costa 590 invece di 650
+Bot:    Cambio il prezzo del tour di Parigi di maggio:
+        - prezzo 650€ → 590€
+        Mi date l'ok e procedo? (rif. 12)
+Giulia: sì vai
+Bot:    Fatto, è online (rif. 12):
+        https://www.tua-agenzia.it/tour-parigi-maggio
 ```
+
+## Tono e trasparenza
+
+Il bot scrive come un collega: italiano colloquiale, frasi brevi, niente emoji o formattazioni
+da "robot", e capisce conferme naturali come "sì vai", "procedi", "lascia perdere".
+Non si spaccia però per una persona: non inventa dettagli personali e, se qualcuno gli chiede
+sul serio se è un bot, risponde di sì. Anche il messaggio di `aiuto` lo dice.
+
+È una scelta voluta: chi scrive nel gruppo ha diritto di sapere con chi parla, e l'AI Act
+europeo (art. 50, obblighi di trasparenza applicabili da agosto 2026) chiede che le persone
+siano informate quando interagiscono con un sistema di intelligenza artificiale. Il modo più
+semplice è dirlo una volta allo staff ("le modifiche al sito le gestisce un assistente
+automatico, passano sempre dall'ok di un responsabile") e dare al numero del bot un nome chiaro,
+es. "Assistente sito".
 
 ## Come funziona
 
@@ -34,7 +43,8 @@ WhatsApp (gruppo) ──webhook──▶ server.ts ──▶ bot.ts ──▶ ai
 
 - **Comprensione delle richieste**: Claude legge il messaggio (con gli ultimi messaggi della chat
   come contesto), cerca e legge i contenuti del sito e propone operazioni precise. Se manca
-  un'informazione fa una domanda nel gruppo; se il messaggio è solo conversazione resta in silenzio.
+  un'informazione fa una domanda nel gruppo, se gli scrivono direttamente risponde in breve,
+  se il messaggio è conversazione tra colleghi resta in silenzio.
 - **Sicurezza**: l'AI non può modificare nulla da sola. Le operazioni sono limitate a: modificare
   titolo / testo / riassunto / stato / campi ACF di pagine e articoli, creare bozze, cambiare
   prezzi WooCommerce. Niente cancellazioni definitive. Ogni operazione viene verificata sul sito
@@ -46,13 +56,16 @@ WhatsApp (gruppo) ──webhook──▶ server.ts ──▶ bot.ts ──▶ ai
 
 | Comando | Cosa fa | Chi |
 |---|---|---|
-| `ok 12` (o `approva 12`, `conferma 12`, `sì 12`) | applica la commessa 12 | responsabili |
-| `ok` | approva l'unica commessa in attesa | responsabili |
-| `annulla 12` (o `no 12`) | scarta la commessa | chi l'ha chiesta o un responsabile |
+| `ok 12` (o `vai 12`, `procedi 12`, `sì 12`) | applica la commessa 12 | responsabili |
+| `sì vai`, `procedi`, `ok`, `va bene`… | approva la proposta appena fatta dal bot | responsabili |
+| `annulla 12` (o `no 12`), `lascia perdere` | scarta la commessa | chi l'ha chiesta o un responsabile |
 | `ripristina 12` | riporta il sito com'era prima della 12 | responsabili |
-| `stato 12` | dettagli della commessa | tutti |
-| `commesse` | commesse aperte e ultime chiuse | tutti |
+| `stato 12` | a che punto è | tutti |
+| `commesse` | cosa c'è in sospeso e le ultime fatte | tutti |
 | `aiuto` | istruzioni | tutti |
+
+Le conferme senza numero valgono solo se l'ultimo messaggio del bot è la proposta di una
+commessa ancora in attesa: un "sì" detto in un altro contesto resta normale conversazione.
 
 ## Requisiti
 
