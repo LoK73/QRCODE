@@ -11,6 +11,16 @@ import crypto from "node:crypto";
  * Doc: https://developers.facebook.com/documentation/business-messaging/whatsapp/groups/groups-messaging
  */
 
+export type MediaKind = "image" | "document" | "audio";
+
+export interface MediaRef {
+  /** ID del file su WhatsApp: serve a scaricarlo. */
+  id: string;
+  kind: MediaKind;
+  mimeType: string;
+  filename?: string;
+}
+
 export interface IncomingMessage {
   /** ID del messaggio (wamid…), usato per non elaborare due volte lo stesso messaggio. */
   id: string;
@@ -21,8 +31,13 @@ export interface IncomingMessage {
   from: string;
   /** Nome profilo WhatsApp del mittente, se disponibile. */
   fromName?: string;
+  /** Testo del messaggio o didascalia dell'allegato; vuoto per allegati senza testo. */
   text: string;
   timestamp: number;
+  /** Foto, documento o vocale allegato. */
+  media?: MediaRef;
+  /** ID del messaggio a cui questo risponde (funzione "Rispondi" di WhatsApp). */
+  replyTo?: string;
 }
 
 export interface WhatsAppOptions {
@@ -31,6 +46,9 @@ export interface WhatsAppOptions {
   graphVersion: string;
   fetch?: typeof fetch;
 }
+
+/** Oltre questa dimensione un allegato non viene scaricato. */
+export const MAX_MEDIA_BYTES = 15 * 1024 * 1024;
 
 export class WhatsAppClient {
   private readonly fetchFn: typeof fetch;
@@ -61,15 +79,34 @@ export class WhatsAppClient {
     return data;
   }
 
-  /** Invia un messaggio di testo nel gruppo o nella chat privata. */
-  async sendText(chatId: string, chatType: "group" | "individual", text: string): Promise<void> {
-    await this.call("POST", `/${this.opts.phoneNumberId}/messages`, {
+  /** Invia un messaggio di testo nel gruppo o nella chat privata; restituisce l'ID del messaggio inviato. */
+  async sendText(chatId: string, chatType: "group" | "individual", text: string): Promise<string | undefined> {
+    const data = await this.call<{ messages?: Array<{ id?: string }> }>("POST", `/${this.opts.phoneNumberId}/messages`, {
       messaging_product: "whatsapp",
       recipient_type: chatType,
       to: chatId,
       type: "text",
       text: { preview_url: true, body: text.slice(0, 4096) },
     });
+    return data.messages?.[0]?.id;
+  }
+
+  /** Scarica un allegato (foto, PDF, vocale) ricevuto in un messaggio. */
+  async downloadMedia(mediaId: string): Promise<{ data: Buffer; mimeType: string }> {
+    const meta = await this.call<{ url?: string; mime_type?: string; file_size?: number }>("GET", `/${mediaId}`);
+    if (!meta.url) throw new Error(`Allegato ${mediaId} non disponibile`);
+    if (meta.file_size && meta.file_size > MAX_MEDIA_BYTES) {
+      throw new Error(`Allegato troppo grande (${Math.round(meta.file_size / 1024 / 1024)} MB)`);
+    }
+    const res = await this.fetchFn(meta.url, { headers: { Authorization: `Bearer ${this.opts.accessToken}` } });
+    if (!res.ok) throw new Error(`Download dell'allegato non riuscito (${res.status})`);
+    const data = Buffer.from(await res.arrayBuffer());
+    if (data.length > MAX_MEDIA_BYTES) throw new Error("Allegato troppo grande");
+    const mimeType = (meta.mime_type ?? res.headers.get("content-type") ?? "application/octet-stream")
+      .split(";")[0]
+      .trim()
+      .toLowerCase();
+    return { data, mimeType };
   }
 
   /** Crea un gruppo. Il link d'invito arriva nel webhook group_lifecycle_update. */
@@ -96,7 +133,10 @@ export function verifySignature(rawBody: Buffer, signatureHeader: string | undef
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-/** Estrae i messaggi di testo da un payload del webhook. Ignora stati, reazioni, media, ecc. */
+/**
+ * Estrae dal payload del webhook i messaggi di testo e quelli con foto,
+ * documenti o vocali. Ignora stati di consegna, reazioni, sticker, ecc.
+ */
 export function parseWebhook(payload: unknown): IncomingMessage[] {
   const out: IncomingMessage[] = [];
   const body = payload as WebhookPayload;
@@ -109,9 +149,32 @@ export function parseWebhook(payload: unknown): IncomingMessage[] {
       const ownNumber = value.metadata?.display_phone_number;
       const names = new Map((value.contacts ?? []).map((c) => [c.wa_id, c.profile?.name]));
       for (const m of value.messages ?? []) {
-        const text = m.type === "text" ? m.text?.body : m.type === "button" ? m.button?.text : undefined;
-        if (!text || !m.from) continue;
+        if (!m.from || !m.id) continue;
         if (ownNumber && m.from === ownNumber) continue; // eco dei messaggi del bot
+
+        let text: string | undefined;
+        let media: MediaRef | undefined;
+        if (m.type === "text") text = m.text?.body;
+        else if (m.type === "button") text = m.button?.text;
+        else if (m.type === "image" && m.image?.id) {
+          text = m.image.caption ?? "";
+          media = { id: m.image.id, kind: "image", mimeType: cleanMime(m.image.mime_type, "image/jpeg") };
+        } else if (m.type === "document" && m.document?.id) {
+          text = m.document.caption ?? "";
+          media = {
+            id: m.document.id,
+            kind: "document",
+            mimeType: cleanMime(m.document.mime_type, "application/octet-stream"),
+            filename: m.document.filename,
+          };
+        } else if (m.type === "audio" && m.audio?.id) {
+          text = "";
+          media = { id: m.audio.id, kind: "audio", mimeType: cleanMime(m.audio.mime_type, "audio/ogg") };
+        }
+        if (text === undefined) continue;
+        text = text.trim();
+        if (!text && !media) continue;
+
         const isGroup = Boolean(m.group_id);
         out.push({
           id: m.id,
@@ -119,13 +182,19 @@ export function parseWebhook(payload: unknown): IncomingMessage[] {
           chatType: isGroup ? "group" : "individual",
           from: m.from,
           fromName: names.get(m.from) ?? undefined,
-          text: text.trim(),
+          text,
           timestamp: Number(m.timestamp ?? Math.floor(Date.now() / 1000)),
+          ...(media ? { media } : {}),
+          ...(m.context?.id ? { replyTo: m.context.id } : {}),
         });
       }
     }
   }
   return out;
+}
+
+function cleanMime(value: string | undefined, fallback: string): string {
+  return (value ?? fallback).split(";")[0].trim().toLowerCase() || fallback;
 }
 
 /**
@@ -140,6 +209,13 @@ export function groupEvents(payload: unknown): Array<{ field: string; value: unk
       .filter((c) => c.field?.startsWith("group_"))
       .map((c) => ({ field: c.field!, value: c.value })),
   );
+}
+
+interface MediaPayload {
+  id?: string;
+  mime_type?: string;
+  caption?: string;
+  filename?: string;
 }
 
 interface WebhookPayload {
@@ -158,6 +234,10 @@ interface WebhookPayload {
           type?: string;
           text?: { body?: string };
           button?: { text?: string };
+          image?: MediaPayload;
+          document?: MediaPayload;
+          audio?: MediaPayload;
+          context?: { id?: string };
         }>;
       };
     }>;

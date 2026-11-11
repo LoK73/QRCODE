@@ -5,6 +5,7 @@
  *   ok 12 / vai 12 / procedi 12 / sì 12   → applica la commessa 12
  *   annulla 12 / no 12                    → scarta la commessa 12
  *   ripristina 12                         → riporta il sito com'era prima della 12
+ *   ripristina 12 forza                   → come sopra, anche se la pagina è stata modificata dopo
  *   stato 12                              → dettagli della commessa 12
  *   commesse                              → elenco
  *   aiuto                                 → istruzioni
@@ -18,7 +19,7 @@
 export type Command =
   | { type: "approve"; id?: number; loose: boolean }
   | { type: "cancel"; id?: number; loose: boolean }
-  | { type: "revert"; id: number }
+  | { type: "revert"; id: number; force: boolean }
   | { type: "status"; id: number }
   | { type: "list" }
   | { type: "help" };
@@ -58,7 +59,10 @@ const PATTERNS: Array<[RegExp, (m: RegExpMatchArray) => Command]> = [
   [new RegExp(String.raw`^(?:${APPROVE_LOOSE})$`, "i"), () => ({ type: "approve", loose: true })],
   [new RegExp(String.raw`^(?:annulla|scarta|no)\s+${REF}$`, "i"), (m) => ({ type: "cancel", id: Number(m[1]), loose: false })],
   [new RegExp(String.raw`^(?:${CANCEL_LOOSE})$`, "i"), () => ({ type: "cancel", loose: true })],
-  [new RegExp(String.raw`^(?:ripristina|rollback|undo)\s+${REF}$`, "i"), (m) => ({ type: "revert", id: Number(m[1]) })],
+  [
+    new RegExp(String.raw`^(?:ripristina|rollback|undo)\s+${REF}(\s+(?:forza|comunque|lo stesso))?$`, "i"),
+    (m) => ({ type: "revert", id: Number(m[1]), force: Boolean(m[2]) }),
+  ],
   [new RegExp(String.raw`^(?:stato|commessa)\s+${REF}$`, "i"), (m) => ({ type: "status", id: Number(m[1]) })],
   [/^(?:commesse|lista commesse|elenco commesse)$/i, () => ({ type: "list" })],
   [/^(?:aiuto|help)$/i, () => ({ type: "help" })],

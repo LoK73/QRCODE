@@ -66,8 +66,14 @@ Due strade, non esclusive:
    l'agenzia diventi *Tech Provider* Meta e usi l'*Embedded Signup*: il cliente collega il suo
    account WhatsApp Business dalla dashboard. Il bot riconosce il cliente dal `phone_number_id`.
 
-Da verificare prima di partire: costi Meta della messaggistica nei gruppi e limiti sul numero di
-gruppi per numero (pagina *Groups → Pricing* della documentazione Meta).
+Costi Meta (verificati a novembre 2026, pagina *Groups → Pricing*): ogni messaggio del bot in un
+gruppo si paga per ogni destinatario che lo riceve; i messaggi liberi sono gratuiti solo entro la
+quota mensile del numero (1.000, condivisa con le chat 1:1) e solo dentro la finestra di
+conversazione aperta dall'ultimo messaggio del gruppo. Conseguenze per la dashboard:
+- il costo WhatsApp va tracciato per cliente accanto a quello dell'AI;
+- un'approvazione dalla dashboard a finestra chiusa richiede un messaggio modello approvato da Meta.
+
+Resta da verificare il limite sul numero di gruppi per numero.
 
 ---
 
@@ -155,6 +161,12 @@ Regola di approvazione configurabile per cliente:
   e il costo calcolato da una tabella prezzi per modello tenuta in configurazione.
 - **Budget**: se un cliente supera il budget AI mensile il bot smette di analizzare i messaggi
   e avvisa l'agenzia (non il gruppo).
+- **Già fatto nel bot attuale** (da portare nel worker così com'è): coda durevole dei messaggi,
+  ripresa dopo riavvio, ripristino che non sovrascrive le modifiche altrui, verifica della
+  pagina pubblica, scadenza delle proposte, modifiche programmate e a tempo, foto/PDF/vocali,
+  correzione delle proposte, ok in risposta al messaggio, ricerca dello stesso dato in più punti.
+- **Correzione dalla dashboard**: la schermata di dettaglio deve permettere di ritoccare la
+  proposta prima di approvarla (oggi si corregge solo scrivendo nel gruppo).
 - **Connettori per altri siti** (fase successiva): `WordPressClient` diventa una delle
   implementazioni di un'interfaccia `SiteConnector`, così si potranno aggiungere Shopify, Webflow, ecc.
 

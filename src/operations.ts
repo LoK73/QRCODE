@@ -99,6 +99,28 @@ export const Interpretation = z.object({
     .array(z.string())
     .optional()
     .describe("Per 'commessa': i cambiamenti in forma 'prima → dopo', brevi (es. 'prezzo 650€ → 590€')"),
+  replaces: z
+    .number()
+    .int()
+    .optional()
+    .describe(
+      "Per 'commessa': il rif. di una proposta ancora in sospeso che questa corregge e sostituisce " +
+        "(es. lo staff risponde 'no, 580 non 590')",
+    ),
+  scheduled_for: z
+    .string()
+    .optional()
+    .describe(
+      "Per 'commessa' da applicare in futuro ('dal 1° dicembre…'): data e ora ISO 8601 con fuso, " +
+        "es. 2026-12-01T00:05:00+01:00. Ometti se va applicata subito.",
+    ),
+  revert_at: z
+    .string()
+    .optional()
+    .describe(
+      "Per 'commessa' a tempo ('offerta valida fino al 30'): data e ora ISO 8601 con fuso in cui " +
+        "rimettere il sito com'era, es. 2026-11-30T23:59:00+01:00",
+    ),
 });
 
 export type Interpretation = z.infer<typeof Interpretation>;

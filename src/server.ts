@@ -4,7 +4,8 @@ import { groupEvents, parseWebhook, verifySignature, type IncomingMessage } from
 export interface ServerOptions {
   verifyToken: string;
   appSecret: string;
-  onMessage: (msg: IncomingMessage) => Promise<void>;
+  /** Mette il messaggio in coda (in modo sincrono e durevole); l'elaborazione avviene dopo. */
+  onMessage: (msg: IncomingMessage) => void;
 }
 
 /**
@@ -47,15 +48,20 @@ export function createServer(opts: ServerOptions) {
       return;
     }
 
-    // Rispondiamo subito a Meta (che altrimenti ripete la notifica) ed elaboriamo dopo.
-    res.sendStatus(200);
-
     for (const ev of groupEvents(payload)) {
       console.log(`[webhook] evento ${ev.field}:`, JSON.stringify(ev.value));
     }
-    for (const msg of parseWebhook(payload)) {
-      opts.onMessage(msg).catch((err) => console.error("[webhook] errore elaborando il messaggio", msg.id, err));
+
+    // Prima salviamo i messaggi, poi rispondiamo: se il salvataggio fallisce
+    // Meta riceve un errore e ripete la notifica, così nulla va perso.
+    try {
+      for (const msg of parseWebhook(payload)) opts.onMessage(msg);
+    } catch (err) {
+      console.error("[webhook] impossibile salvare i messaggi ricevuti:", err);
+      res.sendStatus(500);
+      return;
     }
+    res.sendStatus(200);
   });
 
   return app;

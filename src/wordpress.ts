@@ -42,21 +42,83 @@ export interface ProductDetails {
   sale_price: string;
 }
 
-/** Come annullare un'operazione già applicata. */
+/** Un punto del sito in cui compare un certo testo. */
+export interface Occurrence {
+  id: number;
+  post_type: string;
+  title: string;
+  url: string;
+  status: string;
+  matches: Array<{ where: string; snippet: string }>;
+}
+
+export interface PostFields {
+  title?: string;
+  content?: string;
+  excerpt?: string;
+  status?: string;
+  acf?: Record<string, unknown>;
+}
+
+/**
+ * Come annullare un'operazione già applicata.
+ *
+ * `fields` sono i valori di prima, `written` quelli che WordPress ha salvato
+ * dopo la nostra modifica: al ripristino servono per capire se nel frattempo
+ * qualcuno ha cambiato la pagina a mano. Senza `written` (passo registrato
+ * prima della scrittura, per sicurezza in caso di riavvio) il ripristino è
+ * incondizionato.
+ */
 export type UndoStep =
   | {
       type: "restore_post";
       post_type: string;
       id: number;
-      fields: { title?: string; content?: string; excerpt?: string; status?: string; acf?: Record<string, unknown> };
+      fields: PostFields;
+      written?: PostFields;
+      replacements?: Array<{ find: string; replace: string }>;
     }
   | { type: "trash_post"; post_type: string; id: number }
-  | { type: "restore_price"; product_id: number; regular_price: string; sale_price: string };
+  | {
+      type: "restore_price";
+      product_id: number;
+      regular_price: string;
+      sale_price: string;
+      written?: { regular_price: string; sale_price: string };
+    };
+
+export interface UndoOptions {
+  /** Rimette com'era anche se la pagina è stata modificata nel frattempo. */
+  force?: boolean;
+  /** Controlla soltanto se il ripristino è possibile, senza scrivere nulla. */
+  dryRun?: boolean;
+}
+
+/** Chiamata appena si sa come annullare un'operazione (per le modifiche: prima di scrivere). */
+export type RecordUndo = (undo: UndoStep) => void;
+
+/** Com'è il contenuto dopo l'operazione: visibile sul sito, in bozza, o tolto dal sito. */
+export type Outcome = "online" | "bozza" | "offline";
+
+/** Cosa controllare sulla pagina pubblica per sapere se la modifica si vede davvero. */
+export interface PublicCheck {
+  url: string;
+  /** Testi che devono comparire nella pagina. */
+  present: string[];
+  /** Testi che non devono più comparire. */
+  absent: string[];
+  /** true se la pagina non deve più essere raggiungibile. */
+  gone?: boolean;
+}
+
+export type PublicCheckResult = "visibile" | "non_visibile" | "non_verificabile";
 
 export interface AppliedOperation {
   description: string;
   url: string;
   undo: UndoStep;
+  outcome: Outcome;
+  check?: PublicCheck;
 }
 
 export class WordPressError extends Error {
@@ -66,6 +128,14 @@ export class WordPressError extends Error {
   ) {
     super(message);
     this.name = "WordPressError";
+  }
+}
+
+/** Il contenuto è stato modificato dopo la nostra modifica: il ripristino lo sovrascriverebbe. */
+export class UndoConflictError extends WordPressError {
+  constructor(message: string) {
+    super(message);
+    this.name = "UndoConflictError";
   }
 }
 
@@ -137,10 +207,10 @@ export class WordPressClient {
 
   // ---------------------------------------------------------------- lettura
 
-  async search(query: string): Promise<SearchResult[]> {
+  async search(query: string, perPage = 10): Promise<SearchResult[]> {
     const params = new URLSearchParams({
       search: query,
-      per_page: "10",
+      per_page: String(perPage),
       type: "post",
       subtype: this.opts.postTypes.join(","),
     });
@@ -155,6 +225,45 @@ export class WordPressClient {
     const base = await this.restBase(postType);
     const p = await this.request<WpPost>("GET", `/wp/v2/${base}/${id}?context=edit`);
     return toContentDetails(p, postType);
+  }
+
+  /**
+   * Cerca in quali contenuti compare esattamente un testo (es. "650€"): serve a
+   * trovare lo stesso dato ripetuto in home, elenchi, altre lingue.
+   */
+  async findOccurrences(text: string, limit = 10): Promise<Occurrence[]> {
+    const needle = text.trim().toLowerCase();
+    if (needle.length < 2) throw new WordPressError("Testo da cercare troppo corto");
+    const results = await this.search(text, limit);
+    const out: Occurrence[] = [];
+    for (const r of results) {
+      let c: ContentDetails;
+      try {
+        c = await this.getContent(r.post_type, r.id);
+      } catch {
+        continue;
+      }
+      const matches: Occurrence["matches"] = [];
+      const scan = (where: string, value: unknown) => {
+        if (typeof value !== "string" && typeof value !== "number") return;
+        const hay = String(value);
+        let from = 0;
+        for (let n = 0; n < 3; n++) {
+          const i = hay.toLowerCase().indexOf(needle, from);
+          if (i === -1) break;
+          matches.push({ where, snippet: hay.slice(Math.max(0, i - 80), i + needle.length + 80) });
+          from = i + needle.length;
+        }
+      };
+      scan("title", c.title);
+      scan("excerpt", c.excerpt);
+      scan("content", c.content);
+      for (const [name, value] of Object.entries(c.acf ?? {})) scan(`acf.${name}`, value);
+      if (matches.length) {
+        out.push({ id: c.id, post_type: c.post_type, title: c.title, url: c.url, status: c.status, matches });
+      }
+    }
+    return out;
   }
 
   async searchProducts(query: string): Promise<ProductDetails[]> {
@@ -175,6 +284,34 @@ export class WordPressClient {
     return { ...c, content: c.content.slice(0, MAX_CONTENT_CHARS), truncated: true };
   }
 
+  /**
+   * Apre la pagina pubblica, come farebbe un visitatore, e controlla se la
+   * modifica si vede. Se c'è una cache può comparire ancora la versione vecchia.
+   */
+  async verifyPublic(check: PublicCheck): Promise<PublicCheckResult> {
+    if (!check.gone && check.present.length === 0 && check.absent.length === 0) return "non_verificabile";
+    let res: Response;
+    try {
+      res = await this.fetchFn(check.url, {
+        headers: { Accept: "text/html" },
+        redirect: "follow",
+        signal: AbortSignal.timeout(10_000),
+      });
+    } catch {
+      return "non_verificabile";
+    }
+    if (check.gone) {
+      if (res.status === 404 || res.status === 410) return "visibile";
+      return res.ok ? "non_visibile" : "non_verificabile";
+    }
+    if (!res.ok) return "non_verificabile";
+    const page = normalizeText(await res.text());
+    const ok =
+      check.present.every((t) => page.includes(normalizeText(t))) &&
+      check.absent.every((t) => !page.includes(normalizeText(t)));
+    return ok ? "visibile" : "non_visibile";
+  }
+
   // ---------------------------------------------------------------- scrittura
 
   /** Controlla che l'operazione sia applicabile, senza modificare nulla. */
@@ -182,7 +319,7 @@ export class WordPressClient {
     switch (op.type) {
       case "update_post": {
         const current = await this.getContent(op.post_type, op.id);
-        applyReplacements(current.content, op.content_replacements ?? []);
+        applyReplacements(op.content ?? current.content, op.content_replacements ?? []);
         return;
       }
       case "create_post":
@@ -194,46 +331,113 @@ export class WordPressClient {
     }
   }
 
-  async apply(op: Operation): Promise<AppliedOperation> {
+  async apply(op: Operation, record?: RecordUndo): Promise<AppliedOperation> {
     switch (op.type) {
       case "update_post":
-        return this.applyUpdatePost(op);
+        return this.applyUpdatePost(op, record);
       case "create_post":
-        return this.applyCreatePost(op);
+        return this.applyCreatePost(op, record);
       case "update_product_price":
-        return this.applyUpdatePrice(op);
+        return this.applyUpdatePrice(op, record);
     }
   }
 
-  async undo(step: UndoStep): Promise<void> {
+  /**
+   * Annulla un'operazione. Se il contenuto è stato modificato dopo la nostra
+   * modifica, annulla solo la parte che avevamo cambiato noi; se non è
+   * possibile lancia UndoConflictError (a meno di `force`).
+   */
+  async undo(step: UndoStep, opts: UndoOptions = {}): Promise<void> {
     switch (step.type) {
-      case "restore_post": {
-        const base = await this.restBase(step.post_type);
-        await this.request("POST", `/wp/v2/${base}/${step.id}`, step.fields);
-        return;
-      }
+      case "restore_post":
+        return this.undoRestorePost(step, opts);
       case "trash_post": {
+        if (opts.dryRun) return;
         const base = await this.restBase(step.post_type);
         // senza force=true il contenuto va nel cestino (recuperabile da WordPress)
         await this.request("DELETE", `/wp/v2/${base}/${step.id}`);
         return;
       }
-      case "restore_price":
+      case "restore_price": {
         this.ensureWoo();
-        await this.request("PUT", `/wc/v3/products/${step.product_id}`, {
-          regular_price: step.regular_price,
-          sale_price: step.sale_price,
-        });
+        const previous = { regular_price: step.regular_price, sale_price: step.sale_price };
+        if (step.written && !opts.force) {
+          const current = await this.getProduct(step.product_id);
+          const now = { regular_price: current.regular_price, sale_price: current.sale_price };
+          if (same(now, previous)) return;
+          if (!same(now, step.written)) {
+            throw new UndoConflictError(`il prezzo di "${current.name}" è stato cambiato di nuovo dopo la mia modifica`);
+          }
+        }
+        if (opts.dryRun) return;
+        await this.request("PUT", `/wc/v3/products/${step.product_id}`, previous);
         return;
+      }
     }
   }
 
-  private async applyUpdatePost(op: UpdatePostOp): Promise<AppliedOperation> {
+  private async undoRestorePost(step: Extract<UndoStep, { type: "restore_post" }>, opts: UndoOptions): Promise<void> {
+    const base = await this.restBase(step.post_type);
+    const unconditional = opts.force || !step.written;
+    let body: PostFields = {};
+
+    if (unconditional) {
+      body = step.fields;
+    } else {
+      const current = await this.getContent(step.post_type, step.id);
+      const written = step.written!;
+      const conflicts: string[] = [];
+
+      for (const key of ["title", "excerpt", "status", "content"] as const) {
+        if (!(key in step.fields)) continue;
+        const prev = step.fields[key];
+        const cur = current[key];
+        if (cur === prev) continue; // già com'era
+        if (written[key] === undefined || cur === written[key]) {
+          body[key] = prev;
+          continue;
+        }
+        if (key === "content" && step.replacements?.length) {
+          // La pagina è cambiata altrove: tolgo solo i pezzi che avevo messo io.
+          try {
+            const inverse = [...step.replacements].reverse().map((r) => ({ find: r.replace, replace: r.find }));
+            body.content = applyReplacements(cur, inverse);
+            continue;
+          } catch {
+            // il mio testo non c'è più o non è univoco: è un conflitto vero
+          }
+        }
+        conflicts.push(FIELD_LABEL[key]);
+      }
+
+      for (const [name, prev] of Object.entries(step.fields.acf ?? {})) {
+        const cur = current.acf?.[name] ?? "";
+        if (same(cur, prev)) continue;
+        const wr = written.acf?.[name];
+        if (wr === undefined || same(cur, wr)) {
+          body.acf = { ...(body.acf ?? {}), [name]: prev };
+          continue;
+        }
+        conflicts.push(`il campo "${name}"`);
+      }
+
+      if (conflicts.length) {
+        throw new UndoConflictError(
+          `"${current.title}" è stata modificata dopo la mia modifica (${conflicts.join(", ")})`,
+        );
+      }
+    }
+
+    if (opts.dryRun || Object.keys(body).length === 0) return;
+    await this.request("POST", `/wp/v2/${base}/${step.id}`, body);
+  }
+
+  private async applyUpdatePost(op: UpdatePostOp, record?: RecordUndo): Promise<AppliedOperation> {
     const base = await this.restBase(op.post_type);
     const current = await this.getContent(op.post_type, op.id);
 
-    const update: Record<string, unknown> = {};
-    const previous: Extract<UndoStep, { type: "restore_post" }>["fields"] = {};
+    const update: PostFields = {};
+    const previous: PostFields = {};
 
     if (op.title !== undefined) {
       update.title = op.title;
@@ -247,10 +451,9 @@ export class WordPressClient {
       update.status = op.status;
       previous.status = current.status;
     }
-    if (op.content !== undefined || op.content_replacements?.length) {
-      let content = op.content ?? current.content;
-      content = applyReplacements(content, op.content_replacements ?? []);
-      update.content = content;
+    const replacements = op.content_replacements ?? [];
+    if (op.content !== undefined || replacements.length) {
+      update.content = applyReplacements(op.content ?? current.content, replacements);
       previous.content = current.content;
     }
     if (op.acf?.length) {
@@ -261,15 +464,57 @@ export class WordPressClient {
       throw new WordPressError(`Nessuna modifica indicata per ${op.post_type} #${op.id}`);
     }
 
-    const updated = await this.request<WpPost>("POST", `/wp/v2/${base}/${op.id}`, update);
+    const undo: Extract<UndoStep, { type: "restore_post" }> = {
+      type: "restore_post",
+      post_type: op.post_type,
+      id: op.id,
+      fields: previous,
+      // le sostituzioni si possono invertire solo se partivano dal contenuto esistente
+      ...(op.content === undefined && replacements.length ? { replacements } : {}),
+    };
+    record?.(undo);
+
+    const updated = toContentDetails(await this.request<WpPost>("POST", `/wp/v2/${base}/${op.id}`, update), op.post_type);
+
+    const written: PostFields = {};
+    for (const key of ["title", "excerpt", "status", "content"] as const) {
+      if (key in previous) written[key] = updated[key];
+    }
+    if (previous.acf && updated.acf) {
+      written.acf = Object.fromEntries(Object.keys(previous.acf).map((name) => [name, updated.acf![name]]));
+    }
+
+    const url = updated.url || current.url;
+    const wasLive = current.status === "publish";
+    const isLive = updated.status === "publish";
+    const outcome: Outcome = isLive ? "online" : wasLive ? "offline" : "bozza";
+
+    let check: PublicCheck | undefined;
+    if (outcome === "offline") {
+      check = { url: current.url, present: [], absent: [], gone: true };
+    } else if (outcome === "online") {
+      const present: string[] = [];
+      const absent: string[] = [];
+      if (op.title !== undefined) present.push(op.title);
+      for (const r of replacements) {
+        const added = normalizeText(r.replace);
+        const removed = normalizeText(r.find);
+        if (added.length >= 2) present.push(r.replace);
+        else if (removed.length >= 4) absent.push(r.find);
+      }
+      check = { url, present, absent };
+    }
+
     return {
-      description: `Aggiornato "${rendered(updated.title) || current.title}" (${Object.keys(update).join(", ")})`,
-      url: updated.link ?? current.url,
-      undo: { type: "restore_post", post_type: op.post_type, id: op.id, fields: previous },
+      description: `Aggiornato "${updated.title || current.title}" (${Object.keys(update).join(", ")})`,
+      url,
+      undo: { ...undo, written },
+      outcome,
+      check,
     };
   }
 
-  private async applyCreatePost(op: CreatePostOp): Promise<AppliedOperation> {
+  private async applyCreatePost(op: CreatePostOp, record?: RecordUndo): Promise<AppliedOperation> {
     const base = await this.restBase(op.post_type);
     const body: Record<string, unknown> = {
       title: op.title,
@@ -280,14 +525,20 @@ export class WordPressClient {
     if (op.acf?.length) body.acf = Object.fromEntries(op.acf.map((f) => [f.field, f.value]));
 
     const created = await this.request<WpPost>("POST", `/wp/v2/${base}`, body);
+    const undo: UndoStep = { type: "trash_post", post_type: op.post_type, id: created.id };
+    record?.(undo);
+    const url = created.link ?? `${this.opts.url}/?p=${created.id}`;
+    const live = created.status === "publish";
     return {
-      description: `Creato "${op.title}" (${op.status === "draft" ? "bozza" : "pubblicato"})`,
-      url: created.link ?? `${this.opts.url}/?p=${created.id}`,
-      undo: { type: "trash_post", post_type: op.post_type, id: created.id },
+      description: `Creato "${op.title}" (${live ? "pubblicato" : "bozza"})`,
+      url,
+      undo,
+      outcome: live ? "online" : "bozza",
+      check: live ? { url, present: [op.title], absent: [] } : undefined,
     };
   }
 
-  private async applyUpdatePrice(op: UpdateProductPriceOp): Promise<AppliedOperation> {
+  private async applyUpdatePrice(op: UpdateProductPriceOp, record?: RecordUndo): Promise<AppliedOperation> {
     const current = await this.getProduct(op.product_id);
     const body: Record<string, string> = {};
     if (op.regular_price !== undefined) body.regular_price = op.regular_price;
@@ -295,16 +546,19 @@ export class WordPressClient {
     if (Object.keys(body).length === 0) {
       throw new WordPressError(`Nessun prezzo indicato per il prodotto #${op.product_id}`);
     }
+    const undo: Extract<UndoStep, { type: "restore_price" }> = {
+      type: "restore_price",
+      product_id: op.product_id,
+      regular_price: current.regular_price,
+      sale_price: current.sale_price,
+    };
+    record?.(undo);
     const updated = toProductDetails(await this.request<WcProduct>("PUT", `/wc/v3/products/${op.product_id}`, body));
     return {
       description: `Prezzo di "${updated.name}": ${formatPrice(current)} → ${formatPrice(updated)}`,
       url: updated.url,
-      undo: {
-        type: "restore_price",
-        product_id: op.product_id,
-        regular_price: current.regular_price,
-        sale_price: current.sale_price,
-      },
+      undo: { ...undo, written: { regular_price: updated.regular_price, sale_price: updated.sale_price } },
+      outcome: updated.status === "publish" ? "online" : "bozza",
     };
   }
 
@@ -335,6 +589,17 @@ interface WcProduct {
   status: string;
   regular_price: string;
   sale_price: string;
+}
+
+const FIELD_LABEL = {
+  title: "il titolo",
+  excerpt: "il riassunto",
+  status: "lo stato",
+  content: "il testo",
+} as const;
+
+function same(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
 }
 
 function rendered(field: WpPost["title"] | undefined): string {
@@ -382,6 +647,7 @@ function formatPrice(p: ProductDetails): string {
 export function applyReplacements(content: string, replacements: Array<{ find: string; replace: string }>): string {
   let result = content;
   for (const { find, replace } of replacements) {
+    if (!find) throw new WordPressError("Testo da cercare vuoto");
     const first = result.indexOf(find);
     if (first === -1) {
       throw new WordPressError(`Testo non trovato nella pagina: "${truncate(find)}"`);
@@ -392,6 +658,59 @@ export function applyReplacements(content: string, replacements: Array<{ find: s
     result = result.slice(0, first) + replace + result.slice(first + find.length);
   }
   return result;
+}
+
+const ENTITIES: Record<string, string> = {
+  amp: "&",
+  lt: "<",
+  gt: ">",
+  quot: '"',
+  apos: "'",
+  nbsp: " ",
+  euro: "€",
+  rsquo: "'",
+  lsquo: "'",
+  ldquo: '"',
+  rdquo: '"',
+  ndash: "-",
+  mdash: "-",
+  hellip: "...",
+  agrave: "à",
+  egrave: "è",
+  eacute: "é",
+  igrave: "ì",
+  ograve: "ò",
+  ugrave: "ù",
+};
+
+function codePoint(n: number, fallback: string): string {
+  try {
+    return String.fromCodePoint(n);
+  } catch {
+    return fallback;
+  }
+}
+
+/**
+ * Riduce HTML o testo a parole confrontabili: via tag e commenti, entità
+ * decodificate, virgolette e trattini tipografici uniformati, spazi compressi.
+ */
+export function normalizeText(html: string): string {
+  return html
+    .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, " ")
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&#(\d+);/g, (m, n: string) => codePoint(Number(n), m))
+    .replace(/&#x([0-9a-f]+);/gi, (m, n: string) => codePoint(parseInt(n, 16), m))
+    .replace(/&([a-z]+);/gi, (m, name: string) => ENTITIES[name.toLowerCase()] ?? m)
+    .replace(/[‘’ʼ]/g, "'")
+    .replace(/[“”]/g, '"')
+    .replace(/[–—]/g, "-")
+    .replace(/…/g, "...")
+    .replace(/[   ]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
 }
 
 function truncate(s: string, n = 80): string {

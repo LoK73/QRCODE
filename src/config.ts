@@ -47,6 +47,19 @@ export interface Config {
    * prefisso (es. "#sito"). I comandi (ok 12, annulla 12, …) funzionano sempre.
    */
   triggerPrefix: string;
+  /** Dopo quante ore una proposta rimasta senza OK scade. */
+  proposalTtlHours: number;
+  /** Fuso orario per le date nei messaggi e per le modifiche programmate. */
+  timezone: string;
+  /** Dopo ogni modifica apre la pagina pubblica per controllare che si veda. */
+  verifyPublic: boolean;
+  /** Servizio di trascrizione dei vocali (facoltativo). */
+  transcription?: {
+    url: string;
+    apiKey: string;
+    model: string;
+    language: string;
+  };
 }
 
 function required(name: string): string {
@@ -77,6 +90,15 @@ export function loadConfig(): Config {
     throw new Error(`ANTHROPIC_EFFORT non valido: ${effort} (valori: ${EFFORTS.join(", ")})`);
   }
 
+  const ttl = Number(process.env.PROPOSAL_TTL_HOURS ?? 24);
+  if (!Number.isFinite(ttl) || ttl <= 0) throw new Error("PROPOSAL_TTL_HOURS deve essere un numero maggiore di zero");
+
+  const transcriptionUrl = process.env.TRANSCRIPTION_URL?.trim();
+  const transcriptionKey = process.env.TRANSCRIPTION_API_KEY?.trim();
+  if (Boolean(transcriptionUrl) !== Boolean(transcriptionKey)) {
+    throw new Error("Per i vocali servono sia TRANSCRIPTION_URL sia TRANSCRIPTION_API_KEY (oppure nessuno dei due)");
+  }
+
   return {
     port: Number(process.env.PORT ?? 3000),
     databasePath: process.env.DATABASE_PATH ?? "data/commesse.db",
@@ -102,5 +124,17 @@ export function loadConfig(): Config {
     allowedSenders: list("ALLOWED_SENDERS").map(normalizePhone),
     approvers: list("APPROVERS").map(normalizePhone),
     triggerPrefix: (process.env.TRIGGER_PREFIX ?? "").trim(),
+    proposalTtlHours: ttl,
+    timezone: (process.env.TIMEZONE ?? "Europe/Rome").trim(),
+    verifyPublic: process.env.VERIFY_PUBLIC !== "false",
+    transcription:
+      transcriptionUrl && transcriptionKey
+        ? {
+            url: transcriptionUrl,
+            apiKey: transcriptionKey,
+            model: (process.env.TRANSCRIPTION_MODEL ?? "whisper-1").trim(),
+            language: (process.env.TRANSCRIPTION_LANGUAGE ?? "it").trim(),
+          }
+        : undefined,
   };
 }
