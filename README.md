@@ -60,7 +60,7 @@ WhatsApp (gruppo) ──webhook──▶ server.ts ──▶ queue.ts ──▶ 
 | Funzione | Come si usa | Note |
 |---|---|---|
 | **Foto e PDF** | Si manda la locandina o il listino, con la richiesta nella didascalia o nel messaggio subito dopo | Vale per gli allegati mandati dalla stessa persona negli ultimi 10 minuti. Il bot li legge per ricavare i dati; non carica ancora le immagini sul sito |
-| **Vocali** | Si manda il vocale come un normale messaggio | Serve un servizio di trascrizione (vedi sotto). Senza, il bot chiede di scrivere |
+| **Vocali** | Si manda il vocale come un normale messaggio | Serve la chiave Groq (vedi sotto). Senza, il bot chiede di scrivere |
 | **Modifiche programmate** | "Dal 1° dicembre Parigi costa 590" | Dopo l'ok resta "in programma" e parte alla data indicata |
 | **Offerte a tempo** | "Fino a domenica Parigi a 590" | Alla scadenza il bot rimette il sito com'era e avvisa |
 | **Correzioni** | "No scusate, 580 non 590" | La nuova proposta sostituisce quella sbagliata |
@@ -114,11 +114,12 @@ commessa ancora in attesa: un "sì" detto in un altro contesto resta normale con
    - Pagine costruite con Elementor/Divi salvano il layout altrove: per quelle il bot può
      modificare titolo, stato e campi ACF, ma non il testo impaginato.
 4. **Chiave API Anthropic** per Claude.
-5. *(Facoltativo)* **Servizio di trascrizione** per i vocali: Claude non riceve audio, quindi
-   serve un servizio esterno con un endpoint nel formato più diffuso (`POST` multipart con
-   `file`, `model`, `language`; risposta `{"text": "…"}`), come quello di OpenAI o di Groq.
-   Si configura con `TRANSCRIPTION_URL`, `TRANSCRIPTION_API_KEY` e `TRANSCRIPTION_MODEL`.
-   Attenzione: i vocali dello staff vengono inviati a quel fornitore.
+5. *(Facoltativo)* **Chiave Groq** per i vocali: Claude non riceve audio, quindi i vocali vengono
+   trascritti da Groq (modello `whisper-large-v3-turbo`, il più economico tra quelli confrontati).
+   Basta impostare `TRANSCRIPTION_API_KEY` con una chiave creata su
+   [console.groq.com](https://console.groq.com/). Attenzione: i vocali dello staff vengono
+   inviati a quel fornitore. Per usare un altro servizio con lo stesso formato si cambiano
+   `TRANSCRIPTION_URL` e `TRANSCRIPTION_MODEL`.
 
 ## Installazione
 
@@ -169,7 +170,8 @@ Vedi [.env.example](.env.example). Le principali:
 | `PROPOSAL_TTL_HOURS` | dopo quante ore una proposta senza ok scade (default 24) |
 | `TIMEZONE` | fuso per le date nei messaggi e per le modifiche programmate (default `Europe/Rome`) |
 | `VERIFY_PUBLIC` | `false` per non controllare la pagina pubblica dopo ogni modifica |
-| `TRANSCRIPTION_URL`, `TRANSCRIPTION_API_KEY`, `TRANSCRIPTION_MODEL` | servizio di trascrizione dei vocali (facoltativo) |
+| `TRANSCRIPTION_API_KEY` | chiave Groq: attiva la trascrizione dei vocali (facoltativo) |
+| `TRANSCRIPTION_URL`, `TRANSCRIPTION_MODEL` | solo per usare un servizio diverso da Groq |
 
 ## Sviluppo
 

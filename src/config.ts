@@ -53,7 +53,7 @@ export interface Config {
   timezone: string;
   /** Dopo ogni modifica apre la pagina pubblica per controllare che si veda. */
   verifyPublic: boolean;
-  /** Servizio di trascrizione dei vocali (facoltativo). */
+  /** Servizio di trascrizione dei vocali (facoltativo). Predefinito: Groq. */
   transcription?: {
     url: string;
     apiKey: string;
@@ -84,6 +84,10 @@ export function normalizePhone(phone: string): string {
 
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 
+/** Servizio di trascrizione predefinito per i vocali: Groq, modello Whisper "turbo". */
+export const DEFAULT_TRANSCRIPTION_URL = "https://api.groq.com/openai/v1/audio/transcriptions";
+export const DEFAULT_TRANSCRIPTION_MODEL = "whisper-large-v3-turbo";
+
 export function loadConfig(): Config {
   const effort = (process.env.ANTHROPIC_EFFORT ?? "medium").trim();
   if (!EFFORTS.includes(effort as Config["anthropic"]["effort"])) {
@@ -93,10 +97,11 @@ export function loadConfig(): Config {
   const ttl = Number(process.env.PROPOSAL_TTL_HOURS ?? 24);
   if (!Number.isFinite(ttl) || ttl <= 0) throw new Error("PROPOSAL_TTL_HOURS deve essere un numero maggiore di zero");
 
-  const transcriptionUrl = process.env.TRANSCRIPTION_URL?.trim();
+  // I vocali si attivano con la sola chiave: il servizio predefinito è Groq.
   const transcriptionKey = process.env.TRANSCRIPTION_API_KEY?.trim();
-  if (Boolean(transcriptionUrl) !== Boolean(transcriptionKey)) {
-    throw new Error("Per i vocali servono sia TRANSCRIPTION_URL sia TRANSCRIPTION_API_KEY (oppure nessuno dei due)");
+  const transcriptionUrl = process.env.TRANSCRIPTION_URL?.trim() || DEFAULT_TRANSCRIPTION_URL;
+  if (!transcriptionKey && process.env.TRANSCRIPTION_URL?.trim()) {
+    throw new Error("TRANSCRIPTION_URL è impostato ma manca TRANSCRIPTION_API_KEY");
   }
 
   return {
@@ -128,12 +133,12 @@ export function loadConfig(): Config {
     timezone: (process.env.TIMEZONE ?? "Europe/Rome").trim(),
     verifyPublic: process.env.VERIFY_PUBLIC !== "false",
     transcription:
-      transcriptionUrl && transcriptionKey
+      transcriptionKey
         ? {
             url: transcriptionUrl,
             apiKey: transcriptionKey,
-            model: (process.env.TRANSCRIPTION_MODEL ?? "whisper-1").trim(),
-            language: (process.env.TRANSCRIPTION_LANGUAGE ?? "it").trim(),
+            model: process.env.TRANSCRIPTION_MODEL?.trim() || DEFAULT_TRANSCRIPTION_MODEL,
+            language: process.env.TRANSCRIPTION_LANGUAGE?.trim() || "it",
           }
         : undefined,
   };

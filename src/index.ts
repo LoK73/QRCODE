@@ -41,7 +41,7 @@ if (config.approvers.length === 0) {
   console.warn("⚠️  APPROVERS è vuoto: chiunque nelle chat autorizzate potrà approvare le commesse.");
 }
 if (!config.transcription) {
-  console.warn("ℹ️  Trascrizione dei vocali non configurata (TRANSCRIPTION_URL): ai vocali il bot chiederà di scrivere.");
+  console.warn("ℹ️  Trascrizione dei vocali non configurata (TRANSCRIPTION_API_KEY): ai vocali il bot chiederà di scrivere.");
 }
 
 const queue = new MessageQueue(store, (msg) => bot.handle(msg));
