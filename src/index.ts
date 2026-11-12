@@ -1,4 +1,6 @@
 import { ClaudeInterpreter } from "./ai.js";
+import { logAlerter, WebhookAlerter } from "./alerts.js";
+import { daily } from "./notifications.js";
 import { Bot, type SiteEditor } from "./bot.js";
 import { loadConfig } from "./config.js";
 import { ClaudePrefilter } from "./prefilter.js";
@@ -23,7 +25,10 @@ const site: SiteEditor = {
   ...(config.verifyPublic ? { verifyPublic: (check) => wordpress.verifyPublic(check) } : {}),
 };
 
+const alerter = config.alertWebhookUrl ? new WebhookAlerter({ url: config.alertWebhookUrl }) : logAlerter;
+
 const bot = new Bot(store, interpreter, site, whatsapp, {
+  onProblem: (text) => alerter.alert(text),
   allowedGroups: config.allowedGroups,
   allowedSenders: config.allowedSenders,
   approvers: config.approvers,
@@ -48,7 +53,17 @@ if (!config.transcription) {
   console.warn("ℹ️  Trascrizione dei vocali non configurata (TRANSCRIPTION_API_KEY): ai vocali il bot chiederà di scrivere.");
 }
 
-const queue = new MessageQueue(store, (msg) => bot.handle(msg));
+const queue = new MessageQueue(store, (msg) => bot.handle(msg), {
+  onGiveUp: (msg, reason) => alerter.alert(`Messaggio WhatsApp non elaborato dopo più tentativi (${msg.id}): ${reason}`),
+});
+
+// Privacy: i messaggi delle chat più vecchi del periodo di conservazione vengono cancellati.
+if (config.messageRetentionDays > 0) {
+  daily("conservazione", async () => {
+    const removed = store.pruneMessages(config.messageRetentionDays);
+    if (removed) console.log(`[conservazione] cancellati ${removed} messaggi più vecchi di ${config.messageRetentionDays} giorni`);
+  });
+}
 
 // Ripresa dopo un riavvio: prima le commesse rimaste a metà, poi i messaggi ancora in coda.
 store.pruneJobs();

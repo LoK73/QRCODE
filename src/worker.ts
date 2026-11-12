@@ -6,7 +6,10 @@
  */
 import pg from "pg";
 import { drainActions } from "./actions.js";
+import { logAlerter, WebhookAlerter } from "./alerts.js";
 import { loadWorkerConfig } from "./config.js";
+import { ResendSender } from "./email.js";
+import { daily, proposalNotifier } from "./notifications.js";
 import { ClaudePrefilter } from "./prefilter.js";
 import { MessageQueue } from "./queue.js";
 import { createServer } from "./server.js";
@@ -21,6 +24,8 @@ const pool = new pg.Pool({ connectionString: config.databaseUrl, max: 5 });
 pool.on("error", (err) => console.error("[database] errore di connessione:", err.message));
 const store = new PgStore(pool as unknown as Db);
 const whatsapp = new WhatsAppClient(config.whatsapp);
+const alerter = config.alertWebhookUrl ? new WebhookAlerter({ url: config.alertWebhookUrl }) : logAlerter;
+const email = config.email ? new ResendSender(config.email) : undefined;
 
 const registry = new TenantRegistry({
   store,
@@ -30,6 +35,8 @@ const registry = new TenantRegistry({
   effort: config.anthropic.effort,
   prefilter: new ClaudePrefilter({ model: config.anthropic.prefilterModel }),
   transcriber: config.transcription ? new HttpTranscriber(config.transcription) : undefined,
+  alerter,
+  onProposal: email ? proposalNotifier(store, email, config.dashboardUrl) : undefined,
 });
 
 const queue = new MessageQueue(store, async (msg) => {
@@ -44,6 +51,8 @@ const queue = new MessageQueue(store, async (msg) => {
     return;
   }
   await entry.bot.handle(msg);
+}, {
+  onGiveUp: (msg, reason) => alerter.alert(`Messaggio WhatsApp non elaborato dopo più tentativi (chat ${msg.chatId}): ${reason}`),
 });
 
 // Ripresa dopo un riavvio: commesse a metà, azioni a metà, messaggi in coda.
@@ -55,6 +64,18 @@ await store.resetInterruptedActions();
 const resumed = await queue.resume();
 console.log(`Clienti attivi: ${entries.length} (${entries.filter((e) => e.bot).length} pronti)${resumed ? `, ${resumed} messaggi ripresi dalla coda` : ""}`);
 for (const entry of entries) if (!entry.bot) console.warn(`  ${entry.tenant.name}: ${entry.problem}`);
+
+// Privacy: i messaggi delle chat più vecchi del periodo di conservazione vengono cancellati.
+if (config.messageRetentionDays > 0) {
+  daily("conservazione", async () => {
+    const removed = await store.pruneMessages(config.messageRetentionDays);
+    if (removed) console.log(`[conservazione] cancellati ${removed} messaggi più vecchi di ${config.messageRetentionDays} giorni`);
+  });
+}
+if (!config.email) console.warn("ℹ️  Email ai responsabili non configurate (EMAIL_API_KEY).");
+if (!config.whatsapp.fallbackTemplate) {
+  console.warn("ℹ️  Nessun messaggio modello WhatsApp (WHATSAPP_TEMPLATE_AVVISO): gli avvisi fuori dalla finestra di 24 ore non partono.");
+}
 
 // Modifiche programmate e offerte a scadenza: ogni minuto, per ogni cliente.
 let scheduling = false;

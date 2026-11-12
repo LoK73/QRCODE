@@ -33,7 +33,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
         <div className="me">
           <div className="avatar" aria-hidden="true">{initials}</div>
           <div>
-            <span className="me-name">{session.name}</span>
+            <a href="/profilo" className="me-name" title="Il mio profilo">{session.name}</a>
             <span className="me-role">{roleLabel(session)}</span>
           </div>
           <form action={logout}>

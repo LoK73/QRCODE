@@ -128,6 +128,9 @@ export interface DataStore {
 
   addUsage(chatId: string, usage: AiUsage, commessaId?: number): Awaitable<void>;
   usageSince(chatId: string, sinceIso: string): Awaitable<UsageTotals>;
+
+  /** Cancella i messaggi delle chat più vecchi di N giorni (privacy). Restituisce quanti ne ha tolti. */
+  pruneMessages(days: number): Awaitable<number>;
 }
 
 type Row = Record<string, unknown>;
@@ -443,6 +446,11 @@ export class Store implements DataStore {
     const current = this.get(id);
     if (!current) return;
     this.update(id, { undo: [...current.undo, step] });
+  }
+
+  pruneMessages(days: number): number {
+    const limit = Math.floor(Date.now() / 1000) - days * 86_400;
+    return Number(this.db.prepare("DELETE FROM messaggi WHERE ts < ?").run(limit).changes);
   }
 
   // ------------------------------------------------------------ consumi AI

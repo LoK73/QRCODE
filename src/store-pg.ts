@@ -319,6 +319,41 @@ export class PgStore implements DataStore {
     };
   }
 
+  async pruneMessages(days: number): Promise<number> {
+    const rows = await this.rows(
+      "delete from messaggi where ts < extract(epoch from now() - make_interval(days => $1::int)) returning id",
+      [days],
+    );
+    await this.rows("delete from chat_non_collegate where last_seen < now() - make_interval(days => $1::int)", [days]);
+    return rows.length;
+  }
+
+  // ------------------------------------------------------------ notifiche
+
+  /**
+   * Indirizzi email a cui segnalare una nuova proposta del cliente:
+   * con approvazione "cliente" i suoi responsabili, con approvazione "agenzia"
+   * gli admin e gli operatori. Solo chi non ha disattivato le email.
+   */
+  async proposalRecipients(clientId: string): Promise<string[]> {
+    const rows = await this.rows(
+      `select distinct p.email
+       from memberships m
+       join profiles p on p.id = m.user_id
+       join clients c on c.id = $1
+       where p.email <> '' and p.email_notifications
+         and (
+           (c.approval_rule = 'cliente' and m.client_id = c.id and m.role = 'responsabile_cliente')
+           or (c.approval_rule = 'agenzia' and (
+                 (m.client_id is null and m.role in ('admin_agenzia', 'operatore_agenzia'))
+                 or (m.client_id = c.id and m.role = 'operatore_agenzia')))
+         )
+       order by p.email`,
+      [clientId],
+    );
+    return rows.map((r) => String(r.email));
+  }
+
   // ------------------------------------------------------------ clienti
 
   /** Tutti i clienti attivi con sito, chat e responsabili. */

@@ -16,6 +16,7 @@ const SQL = [
   "../supabase/tests/finto-supabase.sql",
   "../supabase/migrations/20261112000000_init.sql",
   "../supabase/migrations/20261112100000_dashboard.sql",
+  "../supabase/migrations/20261113000000_notifiche.sql",
 ].map((f) =>
   fs.readFileSync(new URL(f, import.meta.url), "utf8"),
 );
@@ -216,6 +217,35 @@ describe("Piattaforma: bot su Postgres con più clienti", () => {
     assert.equal(ai.calls.length, 1, "tetto superato: il messaggio non viene analizzato");
     await route(msg(GROUP_B, "Menù a 55"));
     assert.equal(ai.calls.length, 2, "il tetto di un cliente non blocca gli altri");
+  });
+});
+
+describe("Piattaforma: notifiche e conservazione", () => {
+  it("le email vanno a chi deve approvare e rispettano la preferenza", async () => {
+    assert.deepEqual(await store.proposalRecipients(ids.clientA), ["francesca@aurora.example"]);
+    await pg.query("update clients set approval_rule = 'agenzia' where id = $1", [ids.clientA]);
+    assert.deepEqual(await store.proposalRecipients(ids.clientA), ["giulia@agenzia.example", "luca@agenzia.example"]);
+    await asUser(ids.operatorA, () => pg.query("update profiles set email_notifications = false where id = auth.uid()"));
+    assert.deepEqual(await store.proposalRecipients(ids.clientA), ["giulia@agenzia.example"]);
+    assert.deepEqual(await store.proposalRecipients(ids.clientB), ["piero@dapiero.example"]);
+  });
+
+  it("un utente cambia solo la propria preferenza", async () => {
+    const changed = await asUser(ids.managerA, () => pg.query("update profiles set email_notifications = false where id = $1 returning id", [ids.admin]));
+    assert.equal(changed.rows.length, 0);
+  });
+
+  it("cancella i messaggi vecchi e le chat non collegate abbandonate", async () => {
+    await route(msg(GROUP_A, "Il tour di Parigi di maggio ora costa 590"));
+    await pg.query("update messaggi set ts = ts - 100 * 86400");
+    await store.noteUnknownChat(msg("GRUPPO-VECCHIO", "ciao"));
+    await pg.query("update chat_non_collegate set last_seen = now() - interval '100 days'");
+    ai.next = { kind: "ignora", summary: "" };
+    await route(msg(GROUP_A, "ciao a tutti"));
+    assert.equal(await store.pruneMessages(90), 2);
+    assert.equal((await all("select 1 from messaggi")).length, 1);
+    assert.equal((await all("select 1 from chat_non_collegate")).length, 0);
+    assert.equal((await all("select 1 from commesse")).length, 1, "le commesse restano");
   });
 });
 

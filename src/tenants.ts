@@ -1,5 +1,7 @@
 import { ClaudeInterpreter, type Interpreter } from "./ai.js";
+import type { Alerter } from "./alerts.js";
 import { Bot, type Messenger, type SiteEditor } from "./bot.js";
+import type { Commessa } from "./store.js";
 import type { Prefilter } from "./prefilter.js";
 import { decryptSecret } from "./secrets.js";
 import type { PgStore, Tenant } from "./store-pg.js";
@@ -23,6 +25,10 @@ export interface TenantDeps {
   effort: "low" | "medium" | "high" | "xhigh" | "max";
   prefilter?: Prefilter;
   transcriber?: Transcriber;
+  /** Avvisi all'agenzia; ogni avviso viene preceduto dal nome del cliente. */
+  alerter?: Alerter;
+  /** Chiamata quando un cliente riceve una nuova proposta (es. per le email). */
+  onProposal?: (tenant: Tenant, c: Commessa) => Promise<void>;
   /** Ogni quanti millisecondi rileggere i clienti dal database (default 60 secondi). */
   refreshMs?: number;
   /** Sostituibili nei test. */
@@ -108,6 +114,8 @@ export class TenantRegistry {
       transcriber: this.deps.transcriber,
       prefilter: tenant.prefilter ? this.deps.prefilter : undefined,
       monthlyBudgetUsd: tenant.monthlyBudgetUsd,
+      onProblem: this.deps.alerter ? (text) => this.deps.alerter!.alert(`${tenant.name}: ${text}`) : undefined,
+      onProposal: this.deps.onProposal ? (c) => this.deps.onProposal!(tenant, c) : undefined,
       now: this.deps.now,
     });
     return { tenant, bot, wordpress };

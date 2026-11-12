@@ -319,3 +319,21 @@ export async function removeMember(form: FormData): Promise<void> {
   revalidatePath("/utenti");
   back("/utenti", { ok: "Ruolo rimosso." });
 }
+
+// ------------------------------------------------------------------ profilo
+
+export async function saveProfile(form: FormData): Promise<void> {
+  const session = await requireSession();
+  try {
+    await withUser(session.userId, (q) =>
+      q("update profiles set full_name = $1, email_notifications = $2 where id = auth.uid()", [
+        text(form, "full_name"),
+        flag(form, "email_notifications"),
+      ]),
+    );
+  } catch (err) {
+    back("/profilo", { errore: explain(err) });
+  }
+  revalidatePath("/", "layout");
+  back("/profilo", { ok: "Profilo salvato." });
+}

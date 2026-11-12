@@ -54,6 +54,10 @@ export interface BotOptions {
   prefilter?: Prefilter;
   /** Tetto mensile di spesa AI in dollari: superato quello, il bot smette di analizzare i messaggi. */
   monthlyBudgetUsd?: number;
+  /** Chiamata dopo l'invio di una nuova proposta (es. email ai responsabili). Gli errori finiscono nel log. */
+  onProposal?: (c: Commessa) => Promise<void>;
+  /** Avviso all'agenzia quando qualcosa va storto e serve un intervento. */
+  onProblem?: (text: string) => void;
   /** Orologio, sostituibile nei test. */
   now?: () => Date;
 }
@@ -282,6 +286,9 @@ export class Bot {
         });
         await this.saveUsage(msg.chatId, usages, commessa.id);
         await this.sendProposal(commessa, msg, corrected);
+        if (this.opts.onProposal) {
+          await this.opts.onProposal(commessa).catch((err) => console.error("[bot] notifica della proposta non riuscita:", err));
+        }
         return;
       }
     }
@@ -459,6 +466,11 @@ export class Bot {
             ? "\nHo rimesso com'era la parte che avevo già cambiato."
             : "";
       }
+      this.problem(
+        rollbackErrors.length
+          ? `Commessa ${c.id} non riuscita e ripristino incompleto, il sito va controllato a mano: ${reason}; ${rollbackErrors.join("; ")}`
+          : `Commessa ${c.id} non riuscita: ${reason}`,
+      );
       // L'esito è già salvato: se la notifica fallisce, resta nei log.
       await this.notify(c, `${text} ${refTag(c.id)}`);
       return;
@@ -539,6 +551,7 @@ export class Bot {
         `perdendo quelle modifiche, scrivetemi "ripristina ${id} forza".`;
     } else if (result.errors.length) {
       message = `Non sono riuscito a rimettere com'era: ${result.errors.join("; ")} ${refTag(id)}`;
+      this.problem(`Ripristino della commessa ${id} non riuscito: ${result.errors.join("; ")}`);
     } else {
       message = `Fatto, ho rimesso com'era prima ${refTag(id)}.`;
     }
@@ -679,6 +692,7 @@ export class Bot {
           );
         } else if (result.errors.length) {
           console.error(`[bot] ripristino programmato della commessa #${c.id} non riuscito:`, result.errors);
+          this.problem(`Ripristino programmato della commessa ${c.id} non riuscito: ${result.errors.join("; ")}`);
         } else {
           await this.notify(c, `Come d'accordo ho rimesso com'era ${refTag(c.id)}.`);
         }
@@ -700,6 +714,7 @@ export class Bot {
       const errors = await this.undoAll(c.undo, { force: true });
       if (errors.length) {
         console.error(`[bot] commessa #${c.id} interrotta e non ripristinata:`, errors);
+        this.problem(`Commessa ${c.id} interrotta da un riavvio e non ripristinata, il sito va controllato: ${errors.join("; ")}`);
         await this.store.transition(c.id, "in_corso", "errore", { error: `Interrotta a metà: ${errors.join("; ")}` });
         await this.notify(
           c,
@@ -848,6 +863,15 @@ export class Bot {
       await this.reply({ chatId: c.chatId, chatType: c.chatType }, text);
     } catch (err) {
       console.error(`[bot] impossibile notificare l'esito della commessa #${c.id}:`, err);
+      this.problem(`Messaggio WhatsApp non consegnato per la commessa ${c.id}: ${errorMessage(err)}. Testo: «${text.slice(0, 200)}»`);
+    }
+  }
+
+  private problem(text: string): void {
+    try {
+      this.opts.onProblem?.(text);
+    } catch (err) {
+      console.error("[bot] avviso non inviato:", err);
     }
   }
 }

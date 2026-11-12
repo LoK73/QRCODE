@@ -6,6 +6,8 @@ export interface QueueOptions {
   maxAttempts?: number;
   /** Attesa prima di riprovare (moltiplicata per il numero del tentativo). */
   retryDelayMs?: number;
+  /** Chiamata quando un messaggio viene abbandonato dopo tutti i tentativi. */
+  onGiveUp?: (msg: IncomingMessage, reason: string) => void;
 }
 
 /**
@@ -21,6 +23,7 @@ export class MessageQueue {
   private readonly chains = new Map<string, Promise<void>>();
   private readonly maxAttempts: number;
   private readonly retryDelayMs: number;
+  private readonly onGiveUp?: QueueOptions["onGiveUp"];
   private timers = 0;
 
   constructor(
@@ -30,6 +33,7 @@ export class MessageQueue {
   ) {
     this.maxAttempts = opts.maxAttempts ?? 3;
     this.retryDelayMs = opts.retryDelayMs ?? 5000;
+    this.onGiveUp = opts.onGiveUp;
   }
 
   /**
@@ -78,6 +82,7 @@ export class MessageQueue {
       if (attempt >= this.maxAttempts) {
         console.error(`[coda] messaggio ${msg.id} abbandonato dopo ${attempt} tentativi:`, err);
         await this.store.finishJob(msg.id, "failed", reason);
+        this.onGiveUp?.(msg, reason);
         return;
       }
       console.warn(`[coda] messaggio ${msg.id}: tentativo ${attempt} fallito (${reason}), riprovo`);

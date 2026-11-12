@@ -211,6 +211,26 @@ Vedi [.env.example](.env.example). Le principali:
 
 Ogni push su GitHub esegue test e compilazione di bot e dashboard (`.github/workflows/ci.yml`).
 
+## Avvisi, email e privacy
+
+- **Avvisi all'agenzia**: con `ALERT_WEBHOOK_URL` (webhook in entrata di Slack, Google Chat o
+  Teams) il bot avvisa quando una modifica non riesce, quando un ripristino resta a metà, quando
+  un messaggio WhatsApp non viene consegnato o una richiesta viene abbandonata dopo più
+  tentativi. Lo stesso avviso non si ripete per 10 minuti.
+- **Email ai responsabili** (solo piattaforma): con `EMAIL_API_KEY` di [Resend](https://resend.com),
+  `EMAIL_FROM` (su un dominio verificato) e `DASHBOARD_URL`, a ogni nuova proposta parte
+  un'email con il riepilogo e il link per approvarla. La ricevono i responsabili del cliente,
+  o l'agenzia se l'approvazione è riservata a lei. Ognuno le disattiva da "Il mio profilo".
+- **Messaggi fuori finestra**: WhatsApp accetta testo libero solo entro 24 ore dall'ultimo
+  messaggio del gruppo. Per gli avvisi che arrivano dopo (modifiche programmate, scadenze delle
+  offerte, approvazioni dalla dashboard a distanza di tempo) serve un messaggio modello:
+  createlo in WhatsApp Manager → Modelli di messaggio, categoria **Utility**, lingua italiano,
+  con un solo parametro nel corpo, ad esempio `Aggiornamento sul sito: {{1}}`. Quando Meta lo
+  approva, mettete il nome in `WHATSAPP_TEMPLATE_AVVISO`. I messaggi modello si pagano.
+- **Conservazione dei messaggi**: i messaggi delle chat vengono cancellati dopo
+  `MESSAGE_RETENTION_DAYS` giorni (90 di default). Le commesse, con la richiesta originale,
+  restano come storico.
+
 ## Prima di partire: controllo dei collegamenti
 
 ```bash

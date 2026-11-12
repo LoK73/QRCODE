@@ -16,6 +16,8 @@ export interface Config {
     /** App Secret dell'app Meta: serve a verificare la firma X-Hub-Signature-256. */
     appSecret: string;
     graphVersion: string;
+    /** Messaggio modello per gli avvisi fuori dalla finestra di 24 ore (facoltativo). */
+    fallbackTemplate?: { name: string; language: string };
   };
 
   wordpress: {
@@ -59,6 +61,10 @@ export interface Config {
   timezone: string;
   /** Dopo ogni modifica apre la pagina pubblica per controllare che si veda. */
   verifyPublic: boolean;
+  /** Webhook (Slack, Google Chat, Teams) per gli avvisi all'agenzia; vuoto = solo log. */
+  alertWebhookUrl: string;
+  /** Dopo quanti giorni cancellare i messaggi delle chat; 0 = mai. */
+  messageRetentionDays: number;
   /** Servizio di trascrizione dei vocali (facoltativo). Predefinito: Groq. */
   transcription?: {
     url: string;
@@ -101,7 +107,16 @@ function loadWhatsApp(): Config["whatsapp"] {
     verifyToken: required("WHATSAPP_VERIFY_TOKEN"),
     appSecret: required("WHATSAPP_APP_SECRET"),
     graphVersion: process.env.WHATSAPP_GRAPH_VERSION ?? "v27.0",
+    fallbackTemplate: process.env.WHATSAPP_TEMPLATE_AVVISO?.trim()
+      ? { name: process.env.WHATSAPP_TEMPLATE_AVVISO.trim(), language: process.env.WHATSAPP_TEMPLATE_LINGUA?.trim() || "it" }
+      : undefined,
   };
+}
+
+function loadRetention(): number {
+  const days = Number(process.env.MESSAGE_RETENTION_DAYS ?? 90);
+  if (!Number.isFinite(days) || days < 0) throw new Error("MESSAGE_RETENTION_DAYS deve essere un numero di giorni (0 = mai)");
+  return Math.floor(days);
 }
 
 function loadEffort(): Config["anthropic"]["effort"] {
@@ -138,6 +153,12 @@ export interface WorkerConfig {
   whatsapp: Config["whatsapp"];
   anthropic: { model: string; effort: Config["anthropic"]["effort"]; prefilterModel: string };
   transcription?: Config["transcription"];
+  alertWebhookUrl: string;
+  messageRetentionDays: number;
+  /** Email ai responsabili quando c'è una modifica da approvare (facoltativo). */
+  email?: { apiKey: string; from: string };
+  /** Indirizzo pubblico della dashboard, per i link nelle email. */
+  dashboardUrl: string;
 }
 
 export function loadWorkerConfig(): WorkerConfig {
@@ -152,7 +173,20 @@ export function loadWorkerConfig(): WorkerConfig {
       prefilterModel: process.env.PREFILTER_MODEL?.trim() || "claude-haiku-5-5",
     },
     transcription: loadTranscription(),
+    alertWebhookUrl: (process.env.ALERT_WEBHOOK_URL ?? "").trim(),
+    messageRetentionDays: loadRetention(),
+    email: loadEmail(),
+    dashboardUrl: (process.env.DASHBOARD_URL ?? "").trim().replace(/\/+$/, ""),
   };
+}
+
+function loadEmail(): WorkerConfig["email"] {
+  const apiKey = process.env.EMAIL_API_KEY?.trim();
+  if (!apiKey) return undefined;
+  const from = process.env.EMAIL_FROM?.trim();
+  if (!from) throw new Error("Con EMAIL_API_KEY serve anche EMAIL_FROM (es. Commesse sito <notifiche@tua-agenzia.it>)");
+  if (!process.env.DASHBOARD_URL?.trim()) throw new Error("Con EMAIL_API_KEY serve anche DASHBOARD_URL, per i link nelle email");
+  return { apiKey, from };
 }
 
 export function loadConfig(): Config {
@@ -185,5 +219,7 @@ export function loadConfig(): Config {
     timezone: (process.env.TIMEZONE ?? "Europe/Rome").trim(),
     verifyPublic: process.env.VERIFY_PUBLIC !== "false",
     transcription: loadTranscription(),
+    alertWebhookUrl: (process.env.ALERT_WEBHOOK_URL ?? "").trim(),
+    messageRetentionDays: loadRetention(),
   };
 }

@@ -44,8 +44,29 @@ export interface WhatsAppOptions {
   accessToken: string;
   phoneNumberId: string;
   graphVersion: string;
+  /**
+   * Messaggio modello approvato da Meta, usato quando il testo libero viene
+   * rifiutato perché il gruppo non scrive da più di 24 ore. Il modello deve
+   * avere un solo parametro nel corpo, es. "Aggiornamento sul sito: {{1}}".
+   */
+  fallbackTemplate?: { name: string; language: string };
   fetch?: typeof fetch;
 }
+
+/** Errore restituito dall'API di WhatsApp, con il codice di Meta. */
+export class WhatsAppError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code?: number,
+  ) {
+    super(message);
+    this.name = "WhatsAppError";
+  }
+}
+
+/** Codice di Meta per "fuori dalla finestra di 24 ore: serve un messaggio modello". */
+export const OUTSIDE_WINDOW = 131047;
 
 /** Oltre questa dimensione un allegato non viene scaricato. */
 export const MAX_MEDIA_BYTES = 15 * 1024 * 1024;
@@ -72,8 +93,10 @@ export class WhatsAppClient {
     });
     const data = (await res.json().catch(() => ({}))) as T & { error?: { message?: string; code?: number } };
     if (!res.ok) {
-      throw new Error(
+      throw new WhatsAppError(
         `WhatsApp API ${method} ${path} → ${res.status}: ${data.error?.message ?? res.statusText} (codice ${data.error?.code ?? "?"})`,
+        res.status,
+        data.error?.code,
       );
     }
     return data;
@@ -81,12 +104,32 @@ export class WhatsAppClient {
 
   /** Invia un messaggio di testo nel gruppo o nella chat privata; restituisce l'ID del messaggio inviato. */
   async sendText(chatId: string, chatType: "group" | "individual", text: string): Promise<string | undefined> {
+    try {
+      return await this.send(chatId, chatType, {
+        type: "text",
+        text: { preview_url: true, body: text.slice(0, 4096) },
+      });
+    } catch (err) {
+      const template = this.opts.fallbackTemplate;
+      if (!(err instanceof WhatsAppError) || err.code !== OUTSIDE_WINDOW || !template) throw err;
+      // Il gruppo non scrive da più di 24 ore: si può mandare solo un messaggio modello.
+      return this.send(chatId, chatType, {
+        type: "template",
+        template: {
+          name: template.name,
+          language: { code: template.language },
+          components: [{ type: "body", parameters: [{ type: "text", text: templateParameter(text) }] }],
+        },
+      });
+    }
+  }
+
+  private async send(chatId: string, chatType: "group" | "individual", content: Record<string, unknown>): Promise<string | undefined> {
     const data = await this.call<{ messages?: Array<{ id?: string }> }>("POST", `/${this.opts.phoneNumberId}/messages`, {
       messaging_product: "whatsapp",
       recipient_type: chatType,
       to: chatId,
-      type: "text",
-      text: { preview_url: true, body: text.slice(0, 4096) },
+      ...content,
     });
     return data.messages?.[0]?.id;
   }
@@ -130,6 +173,20 @@ export class WhatsAppClient {
   async getInviteLink(groupId: string): Promise<unknown> {
     return this.call("GET", `/${groupId}/invite_link`);
   }
+}
+
+/**
+ * I parametri dei messaggi modello non possono contenere a capo, tabulazioni o
+ * più di quattro spazi di fila: il testo viene messo su una riga sola.
+ */
+export function templateParameter(text: string, max = 1000): string {
+  const line = text
+    .split("\n")
+    .map((l) => l.trim().replace(/^-\s*/, ""))
+    .filter(Boolean)
+    .join(" · ")
+    .replace(/\s{2,}/g, " ");
+  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
 }
 
 /** Verifica la firma X-Hub-Signature-256 che Meta aggiunge a ogni chiamata del webhook. */
