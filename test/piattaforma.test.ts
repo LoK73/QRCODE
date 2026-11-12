@@ -12,7 +12,11 @@ import { FIXTURE_SITE_URL, fixtureFetch, fixturePages, type FixturePage } from "
 import { FakeInterpreter, FakeMessenger, usage } from "./helpers.js";
 
 const KEY = Buffer.alloc(32, 7).toString("base64");
-const SQL = ["../supabase/tests/finto-supabase.sql", "../supabase/migrations/20261112000000_init.sql"].map((f) =>
+const SQL = [
+  "../supabase/tests/finto-supabase.sql",
+  "../supabase/migrations/20261112000000_init.sql",
+  "../supabase/migrations/20261112100000_dashboard.sql",
+].map((f) =>
   fs.readFileSync(new URL(f, import.meta.url), "utf8"),
 );
 
@@ -320,6 +324,26 @@ describe("Piattaforma: azioni dalla dashboard", () => {
       await pg.query("update clients set show_costs_to_client = true where id = $1", [ids.clientA]);
       assert.equal(await costs(ids.managerA), 1);
       assert.equal(await costs(ids.managerB), 0);
+    });
+
+    it("la password del sito si può sostituire ma non leggere", async () => {
+      const enc = encryptSecret("nuova password", KEY);
+      await asUser(ids.operatorA, () => pg.query("select set_site_secret($1, $2)", [ids.clientA, enc]));
+      assert.equal((await one("select wp_app_password_enc from client_secrets where client_id = $1", [ids.clientA])).wp_app_password_enc, enc);
+      assert.equal((await asUser(ids.operatorA, () => all("select has_site_secret($1) as has", [ids.clientA])))[0].has, true);
+      await assert.rejects(asUser(ids.managerA, () => pg.query("select set_site_secret($1, $2)", [ids.clientA, enc])), /permessi/);
+      await assert.rejects(asUser(ids.operatorA, () => pg.query("select set_site_secret($1, $2)", [ids.clientB, enc])), /permessi/);
+      await assert.rejects(asUser(ids.admin, () => pg.query("select set_site_secret($1, 'in chiaro')", [ids.clientA])), /Formato/);
+    });
+
+    it("le chat non collegate si vedono in dashboard finché non vengono collegate", async () => {
+      await store.noteUnknownChat(msg("GRUPPO-NUOVO", "ciao, siamo la palestra"));
+      await store.noteUnknownChat(msg("GRUPPO-NUOVO", "ci siete?"));
+      const seen = await asUser(ids.admin, () => all("select chat_id, messages, last_text from chat_non_collegate"));
+      assert.deepEqual(seen, [{ chat_id: "GRUPPO-NUOVO", messages: 2, last_text: "ci siete?" }]);
+      assert.equal((await asUser(ids.managerA, () => all("select 1 from chat_non_collegate"))).length, 0);
+      await asUser(ids.admin, () => pg.query("insert into client_channels (client_id, chat_id, name) values ($1, 'GRUPPO-NUOVO', 'Palestra')", [ids.clientB]));
+      assert.equal((await all("select 1 from chat_non_collegate")).length, 0);
     });
 
     it("solo l'agenzia gestisce clienti, chat e utenti", async () => {

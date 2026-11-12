@@ -36,6 +36,7 @@ const queue = new MessageQueue(store, async (msg) => {
   const entry = await registry.forChat(msg.chatId);
   if (!entry) {
     console.warn(`[worker] messaggio da una chat non collegata a nessun cliente: ${msg.chatId}`);
+    await store.noteUnknownChat(msg);
     return;
   }
   if (!entry.bot) {

@@ -18,7 +18,8 @@
     "eval": "tsx --env-file-if-exists=.env scripts/eval.ts",
     "verifica": "tsx --env-file=.env scripts/verifica.ts",
     "start:piattaforma": "node dist/src/worker.js",
-    "dev:piattaforma": "tsx watch --env-file=.env src/worker.ts"
+    "dev:piattaforma": "tsx watch --env-file=.env src/worker.ts",
+    "demo": "tsx --env-file-if-exists=.env.demo scripts/demo.ts"
   },
   "repository": {
     "type": "git",

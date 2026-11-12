@@ -360,6 +360,17 @@ export class PgStore implements DataStore {
     }));
   }
 
+  /** Annota una chat che scrive al bot ma non è collegata a nessun cliente: la dashboard la proporrà. */
+  async noteUnknownChat(msg: IncomingMessage): Promise<void> {
+    await this.rows(
+      `insert into chat_non_collegate (chat_id, chat_type, last_sender, last_text)
+       values ($1, $2, $3, $4)
+       on conflict (chat_id) do update set last_sender = excluded.last_sender, last_text = excluded.last_text,
+         messages = chat_non_collegate.messages + 1, last_seen = now()`,
+      [msg.chatId, msg.chatType, msg.fromName ?? msg.from, msg.text.slice(0, 200)],
+    );
+  }
+
   async saveSiteCheck(clientId: string, check: SiteCheck): Promise<void> {
     await this.rows("update client_sites set last_check = $2::jsonb, last_check_at = now() where client_id = $1", [
       clientId,
