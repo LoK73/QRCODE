@@ -108,7 +108,7 @@ p { margin: 0; }
 .notice.info { background: var(--accent-tint); color: var(--accent-dark); }
 
 /* ---------- tabelle ed elenchi */
-.table-wrap { overflow-x: auto; }
+.table-wrap { overflow-x: auto; position: relative; }
 table { width: 100%; border-collapse: collapse; }
 th { text-align: left; padding: 12px 20px; border-bottom: 1px solid var(--border); font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap; }
 td { padding: 12px 20px; border-bottom: 1px solid var(--line); vertical-align: middle; }
@@ -155,7 +155,9 @@ dl.facts dd { margin: 0; font-weight: 500; overflow-wrap: anywhere; }
 
 /* ---------- moduli */
 form.fields { display: flex; flex-direction: column; gap: 18px; }
-.field { display: flex; flex-direction: column; gap: 6px; flex: 1 1 220px; min-width: 0; }
+.field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+/* La larghezza minima vale solo per i campi affiancati; in colonna sarebbe un'altezza. */
+.fields-row > .field { flex: 1 1 220px; }
 .field label, .field .label { font-weight: 500; }
 .fields-row { display: flex; flex-wrap: wrap; gap: 16px; }
 input[type="text"], input[type="email"], input[type="password"], input[type="url"], input[type="number"], input[type="month"], select, textarea {

@@ -14,6 +14,19 @@ Bot:    Fatto, è online (rif. 12):
         https://www.tua-agenzia.it/tour-parigi-maggio
 ```
 
+## Due modi di usarlo
+
+| | Un solo cliente | Piattaforma multi-cliente |
+|---|---|---|
+| Per chi | un'azienda con il proprio sito | un'agenzia che gestisce i siti di più clienti |
+| Avvio | `npm start` (`src/index.ts`) | `npm run start:piattaforma` (`src/worker.ts`) |
+| Dati | SQLite in `data/` | Postgres su Supabase |
+| Configurazione | file `.env` | dashboard web (`dashboard/`) |
+| Approvazioni | da WhatsApp | da WhatsApp o dalla dashboard |
+
+La logica è la stessa: cambiano solo dove stanno i dati e come si configura.
+Per la piattaforma vedi [Mettere in produzione la piattaforma](#mettere-in-produzione-la-piattaforma).
+
 ## Tono e trasparenza
 
 Il bot scrive come un collega: italiano colloquiale, frasi brevi, niente emoji o formattazioni
@@ -176,6 +189,27 @@ Vedi [.env.example](.env.example). Le principali:
 | `VERIFY_PUBLIC` | `false` per non controllare la pagina pubblica dopo ogni modifica |
 | `TRANSCRIPTION_API_KEY` | chiave Groq: attiva la trascrizione dei vocali (facoltativo) |
 | `TRANSCRIPTION_URL`, `TRANSCRIPTION_MODEL` | solo per usare un servizio diverso da Groq |
+
+## Mettere in produzione la piattaforma
+
+1. **Supabase**: crea un progetto (regione UE), poi applica le migrazioni di
+   `supabase/migrations` in ordine (SQL Editor oppure `supabase db push` con la CLI).
+2. **Configurazione iniziale**: esegui `supabase/configurazione.sql` dopo aver creato il tuo
+   utente in Authentication → Users. Crea l'utente `dashboard_app` e ti rende admin.
+3. **Chiave delle credenziali**: genera `CREDENTIALS_KEY` con `openssl rand -base64 32`. Va
+   messa, identica, nel bot e nella dashboard. Se la perdi, le password dei siti vanno reinserite.
+4. **Bot**: su un server sempre acceso (Railway, Fly.io, Render o un VPS) con
+   `npm run build && npm run start:piattaforma`, oppure con il `Dockerfile` cambiando il
+   comando in `npm run start:piattaforma`. Variabili: `DATABASE_URL` (connessione diretta,
+   utente `postgres`), `CREDENTIALS_KEY`, `WHATSAPP_*`, `ANTHROPIC_API_KEY`, facoltative
+   `PREFILTER_MODEL` e `TRANSCRIPTION_API_KEY`. Il webhook di Meta punta a `/webhook`.
+5. **Dashboard**: su Vercel, vedi [dashboard/README.md](dashboard/README.md). Usa
+   `DATABASE_URL` con l'utente `dashboard_app`.
+6. **Primo cliente**: dalla dashboard → Nuovo cliente → collega il sito (il pulsante prova la
+   connessione) → aggiungi il numero del bot al gruppo WhatsApp del cliente e scrivi un
+   messaggio → il gruppo compare in "Chat WhatsApp" da collegare → aggiungi i responsabili.
+
+Ogni push su GitHub esegue test e compilazione di bot e dashboard (`.github/workflows/ci.yml`).
 
 ## Prima di partire: controllo dei collegamenti
 

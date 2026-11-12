@@ -1,5 +1,11 @@
 # Piano: dashboard multi-cliente per il bot WhatsApp → sito web
 
+> **Stato (12 novembre 2026)**: fasi 0–4 realizzate e provate in locale (bot multi-cliente su
+> Postgres, permessi RLS, dashboard con tutte le schermate, report e CSV). Restano da fare:
+> notifiche email ai clienti, monitoraggio errori (Sentry), conservazione/cancellazione
+> automatica dei messaggi, messaggi modello WhatsApp per gli avvisi fuori finestra, prova con
+> un cliente pilota reale.
+
 Obiettivo: trasformare il bot attuale (un cliente, configurato da file `.env`) in un servizio che
 l'agenzia di digital marketing usa per **più clienti di settori diversi**, gestito da una
 **dashboard web** usata sia dal team dell'agenzia sia dai clienti.
