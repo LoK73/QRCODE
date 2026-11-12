@@ -3,7 +3,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { Operation } from "./operations.js";
 import type { IncomingMessage, MediaRef } from "./whatsapp.js";
-import type { UndoStep } from "./wordpress.js";
+import type { ChangePreview, UndoStep } from "./wordpress.js";
 
 export type CommessaStatus =
   | "in_attesa" // proposta, aspetta l'OK
@@ -26,6 +26,10 @@ export interface Commessa {
   summary: string;
   details: string[];
   operations: Operation[];
+  /** Anteprima prima/dopo calcolata al momento della proposta (per la dashboard). */
+  preview: ChangePreview[];
+  /** true se è una modifica approvabile a colpo d'occhio. */
+  small: boolean;
   status: CommessaStatus;
   approvedBy?: string;
   resultUrls: string[];
@@ -66,7 +70,7 @@ export type NewCommessa = Pick<
   Commessa,
   "chatId" | "chatType" | "requesterId" | "requesterName" | "originalText" | "summary" | "details" | "operations"
 > &
-  Partial<Pick<Commessa, "sourceMessageId" | "applyAt" | "revertAt">>;
+  Partial<Pick<Commessa, "sourceMessageId" | "applyAt" | "revertAt" | "preview" | "small">>;
 
 /** Consumo di una chiamata (o serie di chiamate) a Claude, per i report dei costi. */
 export interface AiUsage {
@@ -198,6 +202,8 @@ export class Store implements DataStore {
     this.ensureColumn("commesse", "proposal_message_id", "TEXT");
     this.ensureColumn("commesse", "apply_at", "TEXT");
     this.ensureColumn("commesse", "revert_at", "TEXT");
+    this.ensureColumn("commesse", "preview", "TEXT NOT NULL DEFAULT '[]'");
+    this.ensureColumn("commesse", "small", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("messaggi", "message_id", "TEXT");
     this.ensureColumn("messaggi", "media", "TEXT");
     this.ensureColumn("messaggi", "media_used", "INTEGER NOT NULL DEFAULT 0");
@@ -336,8 +342,8 @@ export class Store implements DataStore {
     const r = this.db
       .prepare(
         `INSERT INTO commesse (chat_id, chat_type, requester_id, requester_name, original_text, summary, details,
-           operations, status, source_message_id, apply_at, revert_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'in_attesa', ?, ?, ?, ?, ?)`,
+           operations, status, source_message_id, apply_at, revert_at, preview, small, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'in_attesa', ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         c.chatId,
@@ -351,6 +357,8 @@ export class Store implements DataStore {
         c.sourceMessageId ?? null,
         c.applyAt ?? null,
         c.revertAt ?? null,
+        JSON.stringify(c.preview ?? []),
+        c.small ? 1 : 0,
         now,
         now,
       );
@@ -535,6 +543,8 @@ function toCommessa(r: Row): Commessa {
     summary: String(r.summary),
     details: JSON.parse(String(r.details)),
     operations: JSON.parse(String(r.operations)),
+    preview: JSON.parse(String(r.preview ?? "[]")),
+    small: r.small === 1,
     status: r.status as CommessaStatus,
     approvedBy: (r.approved_by as string | null) ?? undefined,
     resultUrls: JSON.parse(String(r.result_urls)),

@@ -42,6 +42,14 @@ export interface ProductDetails {
   sale_price: string;
 }
 
+/** Anteprima di cosa cambia in un contenuto, da mostrare a chi deve approvare. */
+export interface ChangePreview {
+  kind: "modifica" | "nuovo" | "prezzo";
+  title: string;
+  url: string;
+  changes: Array<{ field: string; before: string; after: string }>;
+}
+
 /** Esito del controllo di collegamento a un sito WordPress. */
 export interface SiteCheck {
   ok: boolean;
@@ -409,6 +417,75 @@ export class WordPressClient {
     return ok ? "visibile" : "non_visibile";
   }
 
+  /**
+   * Descrive cosa cambierebbe un'operazione, senza applicarla: per ogni punto
+   * modificato il testo di prima e quello di dopo, in forma leggibile.
+   */
+  async preview(op: Operation): Promise<ChangePreview> {
+    if (op.type === "create_post") {
+      const changes = [
+        { field: "Titolo", before: "", after: op.title },
+        { field: "Testo", before: "", after: clip(plainText(op.content)) },
+      ];
+      if (op.excerpt) changes.push({ field: "Riassunto", before: "", after: op.excerpt });
+      for (const f of op.acf ?? []) changes.push({ field: `Campo «${f.field}»`, before: "", after: f.value });
+      changes.push({ field: "Stato", before: "", after: STATUS_LABEL[op.status] ?? op.status });
+      return { kind: "nuovo", title: op.title, url: "", changes };
+    }
+    if (op.type === "update_product_price") {
+      const product = await this.getProduct(op.product_id);
+      const changes: ChangePreview["changes"] = [];
+      if (op.regular_price !== undefined) {
+        changes.push({ field: "Prezzo", before: product.regular_price, after: op.regular_price });
+      }
+      if (op.sale_price !== undefined) {
+        changes.push({ field: "Prezzo in offerta", before: product.sale_price, after: op.sale_price });
+      }
+      return { kind: "prezzo", title: product.name, url: product.url, changes };
+    }
+
+    const current = await this.getContent(op.post_type, op.id);
+    const changes: ChangePreview["changes"] = [];
+    if (op.title !== undefined) changes.push({ field: "Titolo", before: current.title, after: op.title });
+    if (op.status !== undefined) {
+      changes.push({
+        field: "Stato",
+        before: STATUS_LABEL[current.status] ?? current.status,
+        after: STATUS_LABEL[op.status] ?? op.status,
+      });
+    }
+    if (op.excerpt !== undefined) changes.push({ field: "Riassunto", before: current.excerpt, after: op.excerpt });
+    if (op.content !== undefined) {
+      changes.push({ field: "Testo", before: clip(plainText(current.content)), after: clip(plainText(op.content)) });
+    }
+    // Per ogni sostituzione mostro il blocco di testo in cui cade, prima e dopo.
+    let working = op.content ?? current.content;
+    for (const r of op.content_replacements ?? []) {
+      const at = working.indexOf(r.find);
+      if (at === -1) continue;
+      const blockStart = working.lastIndexOf("\n\n", at);
+      const start = Math.max(blockStart === -1 ? 0 : blockStart + 2, at - 400);
+      const blockEnd = working.indexOf("\n\n", at + r.find.length);
+      const end = Math.min(blockEnd === -1 ? working.length : blockEnd, at + r.find.length + 400);
+      const block = working.slice(start, end);
+      changes.push({
+        field: "Testo",
+        before: clip(plainText(block)),
+        after: clip(plainText(block.replace(r.find, () => r.replace))),
+      });
+      working = working.slice(0, at) + r.replace + working.slice(at + r.find.length);
+    }
+    for (const f of op.acf ?? []) {
+      const before = current.acf?.[f.field];
+      changes.push({
+        field: `Campo «${f.field}»`,
+        before: before === undefined || before === null ? "" : String(before),
+        after: f.value,
+      });
+    }
+    return { kind: "modifica", title: current.title, url: current.url, changes };
+  }
+
   // ---------------------------------------------------------------- scrittura
 
   /** Controlla che l'operazione sia applicabile, senza modificare nulla. */
@@ -688,6 +765,18 @@ interface WcProduct {
   sale_price: string;
 }
 
+const STATUS_LABEL: Record<string, string> = {
+  publish: "pubblicato",
+  draft: "bozza",
+  private: "privato",
+  pending: "in revisione",
+  future: "programmato",
+};
+
+function clip(text: string, max = 600): string {
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
 const FIELD_LABEL = {
   title: "il titolo",
   excerpt: "il riassunto",
@@ -786,6 +875,21 @@ function codePoint(n: number, fallback: string): string {
   } catch {
     return fallback;
   }
+}
+
+/** Toglie markup e commenti da un pezzo di HTML e ne restituisce il testo leggibile. */
+export function plainText(html: string): string {
+  return html
+    .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, " ")
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&#(\d+);/g, (m, n: string) => codePoint(Number(n), m))
+    .replace(/&#x([0-9a-f]+);/gi, (m, n: string) => codePoint(parseInt(n, 16), m))
+    .replace(/&([a-z]+);/gi, (m, name: string) => ENTITIES[name.toLowerCase()] ?? m)
+    .replace(/[   ]/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/ ([,.;:!?])/g, "$1")
+    .trim();
 }
 
 /**

@@ -94,32 +94,75 @@ const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 export const DEFAULT_TRANSCRIPTION_URL = "https://api.groq.com/openai/v1/audio/transcriptions";
 export const DEFAULT_TRANSCRIPTION_MODEL = "whisper-large-v3-turbo";
 
-export function loadConfig(): Config {
+function loadWhatsApp(): Config["whatsapp"] {
+  return {
+    accessToken: required("WHATSAPP_ACCESS_TOKEN"),
+    phoneNumberId: required("WHATSAPP_PHONE_NUMBER_ID"),
+    verifyToken: required("WHATSAPP_VERIFY_TOKEN"),
+    appSecret: required("WHATSAPP_APP_SECRET"),
+    graphVersion: process.env.WHATSAPP_GRAPH_VERSION ?? "v27.0",
+  };
+}
+
+function loadEffort(): Config["anthropic"]["effort"] {
   const effort = (process.env.ANTHROPIC_EFFORT ?? "medium").trim();
   if (!EFFORTS.includes(effort as Config["anthropic"]["effort"])) {
     throw new Error(`ANTHROPIC_EFFORT non valido: ${effort} (valori: ${EFFORTS.join(", ")})`);
   }
+  return effort as Config["anthropic"]["effort"];
+}
 
+function loadTranscription(): Config["transcription"] {
+  // I vocali si attivano con la sola chiave: il servizio predefinito è Groq.
+  const key = process.env.TRANSCRIPTION_API_KEY?.trim();
+  const url = process.env.TRANSCRIPTION_URL?.trim();
+  if (!key) {
+    if (url) throw new Error("TRANSCRIPTION_URL è impostato ma manca TRANSCRIPTION_API_KEY");
+    return undefined;
+  }
+  return {
+    url: url || DEFAULT_TRANSCRIPTION_URL,
+    apiKey: key,
+    model: process.env.TRANSCRIPTION_MODEL?.trim() || DEFAULT_TRANSCRIPTION_MODEL,
+    language: process.env.TRANSCRIPTION_LANGUAGE?.trim() || "it",
+  };
+}
+
+/** Configurazione del bot multi-cliente (src/worker.ts): i dati dei clienti stanno nel database. */
+export interface WorkerConfig {
+  port: number;
+  /** Stringa di connessione diretta a Postgres (Supabase → Project Settings → Database). */
+  databaseUrl: string;
+  /** Chiave con cui sono cifrate le password dei siti dei clienti (32 byte in base64). */
+  credentialsKey: string;
+  whatsapp: Config["whatsapp"];
+  anthropic: { model: string; effort: Config["anthropic"]["effort"]; prefilterModel: string };
+  transcription?: Config["transcription"];
+}
+
+export function loadWorkerConfig(): WorkerConfig {
+  return {
+    port: Number(process.env.PORT ?? 3000),
+    databaseUrl: required("DATABASE_URL"),
+    credentialsKey: required("CREDENTIALS_KEY"),
+    whatsapp: loadWhatsApp(),
+    anthropic: {
+      model: process.env.ANTHROPIC_MODEL ?? "claude-opus-5-5",
+      effort: loadEffort(),
+      prefilterModel: process.env.PREFILTER_MODEL?.trim() || "claude-haiku-5-5",
+    },
+    transcription: loadTranscription(),
+  };
+}
+
+export function loadConfig(): Config {
   const ttl = Number(process.env.PROPOSAL_TTL_HOURS ?? 24);
   if (!Number.isFinite(ttl) || ttl <= 0) throw new Error("PROPOSAL_TTL_HOURS deve essere un numero maggiore di zero");
-
-  // I vocali si attivano con la sola chiave: il servizio predefinito è Groq.
-  const transcriptionKey = process.env.TRANSCRIPTION_API_KEY?.trim();
-  const transcriptionUrl = process.env.TRANSCRIPTION_URL?.trim() || DEFAULT_TRANSCRIPTION_URL;
-  if (!transcriptionKey && process.env.TRANSCRIPTION_URL?.trim()) {
-    throw new Error("TRANSCRIPTION_URL è impostato ma manca TRANSCRIPTION_API_KEY");
-  }
 
   return {
     port: Number(process.env.PORT ?? 3000),
     databasePath: process.env.DATABASE_PATH ?? "data/commesse.db",
-    whatsapp: {
-      accessToken: required("WHATSAPP_ACCESS_TOKEN"),
-      phoneNumberId: required("WHATSAPP_PHONE_NUMBER_ID"),
-      verifyToken: required("WHATSAPP_VERIFY_TOKEN"),
-      appSecret: required("WHATSAPP_APP_SECRET"),
-      graphVersion: process.env.WHATSAPP_GRAPH_VERSION ?? "v27.0",
-    },
+    whatsapp: loadWhatsApp(),
     wordpress: {
       url: required("WP_URL").replace(/\/+$/, ""),
       user: required("WP_USER"),
@@ -129,7 +172,7 @@ export function loadConfig(): Config {
     },
     anthropic: {
       model: process.env.ANTHROPIC_MODEL ?? "claude-opus-5-5",
-      effort: effort as Config["anthropic"]["effort"],
+      effort: loadEffort(),
       prefilterModel: (process.env.PREFILTER_MODEL ?? "").trim(),
       monthlyBudgetUsd: Number(process.env.AI_MONTHLY_BUDGET_USD ?? 0) || 0,
       profile: (process.env.CLIENT_PROFILE ?? "").trim(),
@@ -141,14 +184,6 @@ export function loadConfig(): Config {
     proposalTtlHours: ttl,
     timezone: (process.env.TIMEZONE ?? "Europe/Rome").trim(),
     verifyPublic: process.env.VERIFY_PUBLIC !== "false",
-    transcription:
-      transcriptionKey
-        ? {
-            url: transcriptionUrl,
-            apiKey: transcriptionKey,
-            model: process.env.TRANSCRIPTION_MODEL?.trim() || DEFAULT_TRANSCRIPTION_MODEL,
-            language: process.env.TRANSCRIPTION_LANGUAGE?.trim() || "it",
-          }
-        : undefined,
+    transcription: loadTranscription(),
   };
 }

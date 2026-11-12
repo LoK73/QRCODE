@@ -1,6 +1,6 @@
 import { errorMessage, IMAGE_TYPES, type Attachment, type Interpreter } from "./ai.js";
 import { parseCommand, type Command } from "./commands.js";
-import type { Operation } from "./operations.js";
+import { isSmallChange, type Operation } from "./operations.js";
 import type { Prefilter } from "./prefilter.js";
 import type { AiUsage, ChatMessage, Commessa, CommessaStatus, DataStore } from "./store.js";
 import type { Transcriber } from "./transcribe.js";
@@ -8,6 +8,7 @@ import type { IncomingMessage } from "./whatsapp.js";
 import {
   UndoConflictError,
   type AppliedOperation,
+  type ChangePreview,
   type PublicCheck,
   type PublicCheckResult,
   type RecordUndo,
@@ -25,6 +26,8 @@ export interface SiteEditor {
   apply(op: Operation, record?: RecordUndo): Promise<AppliedOperation>;
   undo(step: UndoStep, opts?: UndoOptions): Promise<void>;
   verifyPublic?(check: PublicCheck): Promise<PublicCheckResult>;
+  /** Descrive cosa cambierebbe un'operazione, senza applicarla. */
+  preview?(op: Operation): Promise<ChangePreview>;
 }
 
 export interface BotOptions {
@@ -40,6 +43,13 @@ export interface BotOptions {
   transcriber?: Transcriber;
   /** Foto e PDF mandati negli ultimi N minuti dalla stessa persona si considerano allegati alla richiesta. */
   mediaWindowMinutes?: number;
+  /**
+   * true = può approvare solo chi è elencato in `approvers` (piattaforma multi-cliente).
+   * false = se l'elenco è vuoto può approvare chiunque nelle chat autorizzate.
+   */
+  strictApprovers?: boolean;
+  /** false = le approvazioni si danno solo dalla dashboard, non da WhatsApp. */
+  chatApproval?: boolean;
   /** Filtro economico: decide se un messaggio va fatto leggere al modello principale. */
   prefilter?: Prefilter;
   /** Tetto mensile di spesa AI in dollari: superato quello, il bot smette di analizzare i messaggi. */
@@ -254,6 +264,7 @@ export class Bot {
           const old = pending.find((c) => c.id === result.replaces);
           if (old) corrected = await this.store.transition(old.id, "in_attesa", "annullata");
         }
+        const operations = result.operations ?? [];
         const commessa = await this.store.createCommessa({
           chatId: msg.chatId,
           chatType: msg.chatType,
@@ -262,7 +273,9 @@ export class Bot {
           originalText: text,
           summary: result.summary,
           details: result.details ?? [],
-          operations: result.operations ?? [],
+          operations,
+          preview: await this.previews(operations),
+          small: isSmallChange(operations),
           sourceMessageId: msg.id,
           applyAt: toIso(result.scheduled_for),
           revertAt: toIso(result.revert_at),
@@ -272,6 +285,20 @@ export class Bot {
         return;
       }
     }
+  }
+
+  /** Anteprima prima/dopo delle operazioni; se non si riesce a calcolarla la commessa nasce lo stesso. */
+  private async previews(operations: Operation[]): Promise<ChangePreview[]> {
+    if (!this.site.preview) return [];
+    const out: ChangePreview[] = [];
+    for (const op of operations) {
+      try {
+        out.push(await this.site.preview(op));
+      } catch (err) {
+        console.warn("[bot] anteprima non calcolata:", errorMessage(err));
+      }
+    }
+    return out;
   }
 
   private async saveUsage(chatId: string, usages: AiUsage[], commessaId?: number): Promise<void> {
@@ -373,6 +400,10 @@ export class Bot {
   private async approve(id: number | undefined, msg: IncomingMessage): Promise<void> {
     if (!this.isApprover(msg.from)) {
       await this.reply(msg, "Per questa aspetto l'ok di un responsabile prima di procedere.");
+      return;
+    }
+    if (this.opts.chatApproval === false) {
+      await this.reply(msg, "Per questa serve l'ok dell'agenzia: lo danno dalla dashboard.");
       return;
     }
     const c = await this.resolveOpen(id, msg, ["in_attesa"]);
@@ -557,6 +588,30 @@ export class Bot {
     return { ok, message };
   }
 
+  /** Rifà da capo una commessa non riuscita o scaduta e manda la nuova proposta nel gruppo. */
+  async retryById(id: number): Promise<ActionResult> {
+    const c = await this.ownedCommessa(id);
+    if (!c) return { ok: false, message: `Commessa ${id} non trovata.` };
+    if (this.isExpired(c)) await this.store.transition(c.id, "in_attesa", "scaduta");
+    else if (c.status !== "errore" && c.status !== "scaduta") {
+      return { ok: false, message: "Questa commessa non ha bisogno di essere rifatta." };
+    }
+    const msg: IncomingMessage = {
+      id: `riprova-${c.id}-${this.now().getTime()}`,
+      chatId: c.chatId,
+      chatType: c.chatType,
+      from: c.requesterId,
+      fromName: c.requesterName,
+      text: c.originalText,
+      timestamp: Math.floor(this.now().getTime() / 1000),
+    };
+    await this.handleRequest(msg, c.originalText, await this.store.recentMessages(c.chatId));
+    const created = await this.store.findBySourceMessage(msg.id);
+    return created
+      ? { ok: true, message: `Nuova proposta: rif. ${created.id}.` }
+      : { ok: false, message: "Non ne è uscita una nuova proposta: guarda la conversazione nel gruppo." };
+  }
+
   /** true se la commessa appartiene alle chat servite da questo bot. */
   owns(c: Pick<Commessa, "chatId" | "chatType">): boolean {
     if (c.chatType === "group") return this.opts.allowedGroups.includes(c.chatId);
@@ -736,7 +791,8 @@ export class Bot {
   /** Una commessa è visibile nella chat in cui è nata, oppure a un responsabile ovunque. */
   private async findVisible(id: number, msg: IncomingMessage): Promise<Commessa | undefined> {
     const c = await this.store.get(id);
-    if (!c) return undefined;
+    // Mai le commesse di un altro cliente, nemmeno conoscendone il numero.
+    if (!c || !this.owns(c)) return undefined;
     if (c.chatId === msg.chatId || this.isApprover(msg.from)) return c;
     return undefined;
   }
@@ -769,6 +825,7 @@ export class Bot {
   }
 
   private isApprover(waId: string): boolean {
+    if (this.opts.strictApprovers) return this.opts.approvers.includes(waId);
     // Senza APPROVERS configurati chiunque nelle chat autorizzate può approvare.
     return this.opts.approvers.length === 0 || this.opts.approvers.includes(waId);
   }

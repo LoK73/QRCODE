@@ -84,6 +84,12 @@ export function fixtureFetch(pages: FixturePage[] = fixturePages()): typeof fetc
     const url = new URL(String(input));
     const method = init?.method ?? "GET";
     const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined;
+    // Pagina pubblica, come la vede un visitatore: serve alla verifica dopo la pubblicazione.
+    if (!url.pathname.startsWith("/wp-json")) {
+      const pg = pages.find((x) => `/${x.slug}` === url.pathname.replace(/\/$/, "") && x.status === "publish");
+      if (!pg) return new Response("<h1>Pagina non trovata</h1>", { status: 404 });
+      return new Response(`<html><body><h1>${pg.title}</h1>${pg.content}</body></html>`, { headers: { "Content-Type": "text/html" } });
+    }
     const path = url.pathname.replace("/wp-json", "");
 
     if (path === "/wp/v2/types") {

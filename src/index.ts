@@ -19,6 +19,7 @@ const interpreter = new ClaudeInterpreter(wordpress, config.anthropic);
 const site: SiteEditor = {
   apply: (op, record) => wordpress.apply(op, record),
   undo: (step, opts) => wordpress.undo(step, opts),
+  preview: (op) => wordpress.preview(op),
   ...(config.verifyPublic ? { verifyPublic: (check) => wordpress.verifyPublic(check) } : {}),
 };
 
