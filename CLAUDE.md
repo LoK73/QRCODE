@@ -10,3 +10,6 @@
   ("Gestionale Escursioni", "Prop Control", TravelPro) sono di altri lavori: non usarli e non
   modificarli per questa piattaforma.
 - Creare, riattivare, mettere in pausa o modificare progetti solo con l'ok esplicito.
+
+## Stato dei lavori
+- Prima di riprendere, leggi `docs/stato-lavori.md`: cosa è fatto e quali sono i prossimi passi.
