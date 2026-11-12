@@ -34,6 +34,12 @@ export interface Config {
   anthropic: {
     model: string;
     effort: "low" | "medium" | "high" | "xhigh" | "max";
+    /** Modello piccolo usato come filtro prima di quello principale; vuoto = filtro spento. */
+    prefilterModel: string;
+    /** Tetto mensile di spesa AI in dollari per chat; 0 = nessun tetto. */
+    monthlyBudgetUsd: number;
+    /** Scheda del cliente aggiunta alle istruzioni dell'AI. */
+    profile: string;
   };
 
   /** Gruppi (group_id) da cui il bot accetta richieste. Vuoto = nessun gruppo. */
@@ -124,6 +130,9 @@ export function loadConfig(): Config {
     anthropic: {
       model: process.env.ANTHROPIC_MODEL ?? "claude-opus-5-5",
       effort: effort as Config["anthropic"]["effort"],
+      prefilterModel: (process.env.PREFILTER_MODEL ?? "").trim(),
+      monthlyBudgetUsd: Number(process.env.AI_MONTHLY_BUDGET_USD ?? 0) || 0,
+      profile: (process.env.CLIENT_PROFILE ?? "").trim(),
     },
     allowedGroups: list("ALLOWED_GROUPS"),
     allowedSenders: list("ALLOWED_SENDERS").map(normalizePhone),

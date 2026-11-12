@@ -54,8 +54,8 @@ describe("Coda dei messaggi", () => {
   it("elabora una volta sola un messaggio ripetuto dal webhook", async () => {
     const queue = new MessageQueue(store, (m) => bot.handle(m), { retryDelayMs: 0 });
     const msg = groupMsg("Parigi ora costa 590€");
-    assert.equal(queue.enqueue(msg), true);
-    assert.equal(queue.enqueue(msg), false);
+    assert.equal(await queue.enqueue(msg), true);
+    assert.equal(await queue.enqueue(msg), false);
     await queue.idle();
     assert.equal(ai.calls.length, 1);
     assert.equal(store.jobStatus(msg.id), "done");
@@ -73,7 +73,7 @@ describe("Coda dei messaggi", () => {
       log.push(`fine ${m.text}`);
       running--;
     });
-    for (const t of ["a", "b", "c"]) queue.enqueue(groupMsg(t));
+    for (const t of ["a", "b", "c"]) await queue.enqueue(groupMsg(t));
     await queue.idle();
     assert.equal(maxTogether, 1);
     assert.deepEqual(log, ["inizio a", "fine a", "inizio b", "fine b", "inizio c", "fine c"]);
@@ -89,7 +89,7 @@ describe("Coda dei messaggi", () => {
       { retryDelayMs: 0 },
     );
     const first = groupMsg("uno");
-    ok.enqueue(first);
+    await ok.enqueue(first);
     await ok.idle();
     assert.equal(store.jobStatus(first.id), "done");
 
@@ -101,7 +101,7 @@ describe("Coda dei messaggi", () => {
       { retryDelayMs: 0, maxAttempts: 2 },
     );
     const second = groupMsg("due");
-    broken.enqueue(second);
+    await broken.enqueue(second);
     await broken.idle();
     assert.equal(store.jobStatus(second.id), "failed");
   });
@@ -113,7 +113,7 @@ describe("Coda dei messaggi", () => {
     assert.equal(store.jobStatus(msg.id), "processing");
 
     const queue = new MessageQueue(store, (m) => bot.handle(m), { retryDelayMs: 0 });
-    assert.equal(queue.resume(), 1);
+    assert.equal(await queue.resume(), 1);
     await queue.idle();
     assert.equal(store.jobStatus(msg.id), "done");
     assert.match(wa.last, /Mi date l'ok e procedo\? \(rif\. 1\)/);

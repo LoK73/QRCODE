@@ -6,6 +6,7 @@ COPY tsconfig.json ./
 COPY src ./src
 COPY scripts ./scripts
 COPY test ./test
+COPY evals ./evals
 RUN npm run build
 
 FROM node:22-slim

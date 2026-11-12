@@ -14,7 +14,9 @@
     "dev": "tsx watch --env-file=.env src/index.ts",
     "test": "node --disable-warning=ExperimentalWarning --import tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "crea-gruppo": "tsx --env-file=.env scripts/create-group.ts"
+    "crea-gruppo": "tsx --env-file=.env scripts/create-group.ts",
+    "eval": "tsx --env-file-if-exists=.env scripts/eval.ts",
+    "verifica": "tsx --env-file=.env scripts/verifica.ts"
   },
   "repository": {
     "type": "git",

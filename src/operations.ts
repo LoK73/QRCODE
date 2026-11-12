@@ -124,3 +124,19 @@ export const Interpretation = z.object({
 });
 
 export type Interpretation = z.infer<typeof Interpretation>;
+
+/**
+ * Una modifica è "piccola" se tocca un solo contenuto con poche sostituzioni
+ * puntuali o un prezzo. Le modifiche piccole si possono approvare a colpo
+ * d'occhio dall'elenco; per le altre conviene aprire il dettaglio.
+ */
+export function isSmallChange(operations: Operation[]): boolean {
+  if (operations.length !== 1) return false;
+  const op = operations[0];
+  if (op.type === "update_product_price") return true;
+  if (op.type !== "update_post") return false;
+  if (op.content !== undefined || op.status !== undefined || op.title !== undefined) return false;
+  const replacements = op.content_replacements ?? [];
+  const longest = Math.max(0, ...replacements.map((r) => Math.max(r.find.length, r.replace.length)));
+  return replacements.length + (op.acf?.length ?? 0) <= 3 && longest <= 200;
+}

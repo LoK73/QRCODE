@@ -42,6 +42,21 @@ export interface ProductDetails {
   sale_price: string;
 }
 
+/** Esito del controllo di collegamento a un sito WordPress. */
+export interface SiteCheck {
+  ok: boolean;
+  /** Cosa non va, in parole semplici (vuoto se è tutto a posto). */
+  problems: string[];
+  user?: { name: string; roles: string[] };
+  /** Tipi di contenuto presenti sul sito e modificabili via REST. */
+  availableTypes: Array<{ slug: string; name: string }>;
+  /** Tipi configurati per il bot che sul sito non esistono. */
+  missingTypes: string[];
+  /** true se i campi personalizzati ACF sono esposti nella REST API. */
+  acfVisible: boolean;
+  woocommerce: boolean;
+}
+
 /** Un punto del sito in cui compare un certo testo. */
 export interface Occurrence {
   id: number;
@@ -95,7 +110,7 @@ export interface UndoOptions {
 }
 
 /** Chiamata appena si sa come annullare un'operazione (per le modifiche: prima di scrivere). */
-export type RecordUndo = (undo: UndoStep) => void;
+export type RecordUndo = (undo: UndoStep) => unknown;
 
 /** Com'è il contenuto dopo l'operazione: visibile sul sito, in bozza, o tolto dal sito. */
 export type Outcome = "online" | "bozza" | "offline";
@@ -203,6 +218,88 @@ export class WordPressClient {
     const base = this.restBases.get(postType);
     if (!base) throw new WordPressError(`Tipo di contenuto "${postType}" non trovato sul sito`);
     return base;
+  }
+
+  // ---------------------------------------------------------------- controllo
+
+  /**
+   * Verifica che il bot riesca a lavorare su questo sito, senza modificare
+   * nulla: accesso, permessi, tipi di contenuto, campi ACF, WooCommerce.
+   */
+  async checkConnection(): Promise<SiteCheck> {
+    const result: SiteCheck = {
+      ok: false,
+      problems: [],
+      availableTypes: [],
+      missingTypes: [],
+      acfVisible: false,
+      woocommerce: false,
+    };
+
+    let me: { name?: string; roles?: string[]; capabilities?: Record<string, boolean> };
+    try {
+      me = await this.request("GET", "/wp/v2/users/me?context=edit");
+    } catch (err) {
+      const status = err instanceof WordPressError ? err.status : undefined;
+      result.problems.push(
+        status === 401 || status === 403
+          ? "Accesso rifiutato: utente o password applicazione non corretti."
+          : status === 404
+            ? "Il sito non espone la REST API di WordPress (wp-json): controlla l'indirizzo o i plugin di sicurezza."
+            : `Sito non raggiungibile: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return result;
+    }
+    result.user = { name: me.name ?? this.opts.user, roles: me.roles ?? [] };
+    if (me.capabilities && !me.capabilities.edit_others_posts && !me.capabilities.edit_others_pages) {
+      result.problems.push("L'utente non può modificare i contenuti degli altri: serve almeno il ruolo Editor.");
+    }
+
+    try {
+      const types = await this.request<Record<string, { slug: string; name: string; rest_base: string; viewable?: boolean }>>(
+        "GET",
+        "/wp/v2/types?context=edit",
+      );
+      const hidden = new Set(["attachment", "nav_menu_item", "wp_block", "wp_template", "wp_template_part", "wp_navigation", "wp_global_styles", "wp_font_family", "wp_font_face"]);
+      result.availableTypes = Object.values(types)
+        .filter((t) => !hidden.has(t.slug))
+        .map((t) => ({ slug: t.slug, name: t.name }));
+      const slugs = new Set(Object.keys(types));
+      result.missingTypes = this.opts.postTypes.filter((t) => !slugs.has(t));
+      if (result.missingTypes.length) {
+        result.problems.push(`Tipi di contenuto non trovati sul sito: ${result.missingTypes.join(", ")}.`);
+      }
+      this.restBases = new Map(Object.values(types).map((t) => [t.slug, t.rest_base || t.slug]));
+    } catch (err) {
+      result.problems.push(`Non riesco a leggere i tipi di contenuto: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    // ACF: se è attivo "Show in REST API", ogni contenuto ha la chiave "acf".
+    const firstType = this.opts.postTypes.find((t) => !result.missingTypes.includes(t));
+    if (firstType && this.restBases?.has(firstType)) {
+      try {
+        const items = await this.request<Array<{ acf?: unknown }>>(
+          "GET",
+          `/wp/v2/${this.restBases.get(firstType)}?per_page=1&context=edit&status=any`,
+        );
+        result.acfVisible = items.some((i) => i.acf !== undefined);
+      } catch {
+        // non determinante
+      }
+    }
+
+    try {
+      await this.request("GET", "/wc/v3/system_status?_fields=environment");
+      result.woocommerce = true;
+    } catch {
+      result.woocommerce = false;
+    }
+    if (this.opts.woocommerce && !result.woocommerce) {
+      result.problems.push("WooCommerce è attivato nelle impostazioni ma sul sito non risponde (o l'utente non ha i permessi).");
+    }
+
+    result.ok = result.problems.length === 0;
+    return result;
   }
 
   // ---------------------------------------------------------------- lettura
@@ -472,7 +569,7 @@ export class WordPressClient {
       // le sostituzioni si possono invertire solo se partivano dal contenuto esistente
       ...(op.content === undefined && replacements.length ? { replacements } : {}),
     };
-    record?.(undo);
+    await record?.(undo);
 
     const updated = toContentDetails(await this.request<WpPost>("POST", `/wp/v2/${base}/${op.id}`, update), op.post_type);
 
@@ -526,7 +623,7 @@ export class WordPressClient {
 
     const created = await this.request<WpPost>("POST", `/wp/v2/${base}`, body);
     const undo: UndoStep = { type: "trash_post", post_type: op.post_type, id: created.id };
-    record?.(undo);
+    await record?.(undo);
     const url = created.link ?? `${this.opts.url}/?p=${created.id}`;
     const live = created.status === "publish";
     return {
@@ -552,7 +649,7 @@ export class WordPressClient {
       regular_price: current.regular_price,
       sale_price: current.sale_price,
     };
-    record?.(undo);
+    await record?.(undo);
     const updated = toProductDetails(await this.request<WcProduct>("PUT", `/wc/v3/products/${op.product_id}`, body));
     return {
       description: `Prezzo di "${updated.name}": ${formatPrice(current)} → ${formatPrice(updated)}`,

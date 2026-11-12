@@ -68,10 +68,68 @@ export type NewCommessa = Pick<
 > &
   Partial<Pick<Commessa, "sourceMessageId" | "applyAt" | "revertAt">>;
 
+/** Consumo di una chiamata (o serie di chiamate) a Claude, per i report dei costi. */
+export interface AiUsage {
+  model: string;
+  /** A cosa è servita: "interpretazione" o "filtro". */
+  purpose: string;
+  calls: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  /** Costo stimato in dollari; undefined se il prezzo del modello non è noto. */
+  costUsd?: number;
+}
+
+export interface UsageTotals {
+  calls: number;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+}
+
+export type Awaitable<T> = T | Promise<T>;
+
+/**
+ * Tutto ciò che il bot chiede all'archivio. Ci sono due implementazioni:
+ * `Store` (SQLite, un solo cliente, usata anche nei test) e `PgStore`
+ * (Postgres/Supabase, più clienti). I metodi possono essere sincroni o
+ * asincroni: chi li usa mette sempre `await`.
+ */
+export interface DataStore {
+  enqueue(msg: IncomingMessage): Awaitable<boolean>;
+  claimJob(messageId: string): Awaitable<number>;
+  finishJob(messageId: string, status: "done" | "failed" | "pending", error?: string): Awaitable<void>;
+  resetInterruptedJobs(): Awaitable<number>;
+  pendingJobs(): Awaitable<Job[]>;
+  pruneJobs(days?: number): Awaitable<void>;
+
+  addMessage(chatId: string, msg: ChatMessage): Awaitable<void>;
+  recentMessages(chatId: string, limit?: number): Awaitable<ChatMessage[]>;
+  recentMedia(chatId: string, sender: string, sinceTs: number, limit?: number): Awaitable<Array<{ rowId: number; media: MediaRef }>>;
+  markMediaUsed(rowIds: number[]): Awaitable<void>;
+
+  createCommessa(c: NewCommessa): Awaitable<Commessa>;
+  get(id: number): Awaitable<Commessa | undefined>;
+  findBySourceMessage(messageId: string): Awaitable<Commessa | undefined>;
+  findByProposalMessage(messageId: string): Awaitable<Commessa | undefined>;
+  list(chatId: string, statuses: CommessaStatus[], limit?: number): Awaitable<Commessa[]>;
+  listByStatus(statuses: CommessaStatus[]): Awaitable<Commessa[]>;
+  dueToApply(nowIso: string): Awaitable<Commessa[]>;
+  dueToRevert(nowIso: string): Awaitable<Commessa[]>;
+  transition(id: number, from: CommessaStatus, to: CommessaStatus, extra?: CommessaPatch): Awaitable<boolean>;
+  update(id: number, patch: CommessaPatch): Awaitable<void>;
+  appendUndo(id: number, step: UndoStep): Awaitable<void>;
+
+  addUsage(chatId: string, usage: AiUsage, commessaId?: number): Awaitable<void>;
+  usageSince(chatId: string, sinceIso: string): Awaitable<UsageTotals>;
+}
+
 type Row = Record<string, unknown>;
 
 /** Archivio su SQLite (node:sqlite, nessuna dipendenza esterna): commesse, cronologia e coda dei messaggi. */
-export class Store {
+export class Store implements DataStore {
   private readonly db: DatabaseSync;
 
   constructor(file: string) {
@@ -119,6 +177,21 @@ export class Store {
         updated_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS inbox_status ON inbox(status);
+      CREATE TABLE IF NOT EXISTS consumi_ai (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id TEXT NOT NULL,
+        commessa_id INTEGER,
+        model TEXT NOT NULL,
+        purpose TEXT NOT NULL,
+        calls INTEGER NOT NULL,
+        input_tokens INTEGER NOT NULL,
+        output_tokens INTEGER NOT NULL,
+        cache_read_tokens INTEGER NOT NULL,
+        cache_write_tokens INTEGER NOT NULL,
+        cost_usd REAL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS consumi_ai_chat ON consumi_ai(chat_id, created_at);
     `);
     // Colonne aggiunte dopo la prima versione: le creo se il database è più vecchio.
     this.ensureColumn("commesse", "source_message_id", "TEXT");
@@ -362,6 +435,48 @@ export class Store {
     const current = this.get(id);
     if (!current) return;
     this.update(id, { undo: [...current.undo, step] });
+  }
+
+  // ------------------------------------------------------------ consumi AI
+
+  addUsage(chatId: string, usage: AiUsage, commessaId?: number): void {
+    this.db
+      .prepare(
+        `INSERT INTO consumi_ai (chat_id, commessa_id, model, purpose, calls, input_tokens, output_tokens,
+           cache_read_tokens, cache_write_tokens, cost_usd, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        chatId,
+        commessaId ?? null,
+        usage.model,
+        usage.purpose,
+        usage.calls,
+        usage.inputTokens,
+        usage.outputTokens,
+        usage.cacheReadTokens,
+        usage.cacheWriteTokens,
+        usage.costUsd ?? null,
+        new Date().toISOString(),
+      );
+  }
+
+  usageSince(chatId: string, sinceIso: string): UsageTotals {
+    const r = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(calls), 0) AS calls,
+                COALESCE(SUM(input_tokens + cache_read_tokens + cache_write_tokens), 0) AS input_tokens,
+                COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(cost_usd), 0) AS cost_usd
+         FROM consumi_ai WHERE chat_id = ? AND created_at >= ?`,
+      )
+      .get(chatId, sinceIso) as Row;
+    return {
+      calls: Number(r.calls),
+      inputTokens: Number(r.input_tokens),
+      outputTokens: Number(r.output_tokens),
+      costUsd: Number(r.cost_usd),
+    };
   }
 
   close(): void {

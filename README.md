@@ -93,6 +93,7 @@ WhatsApp (gruppo) ──webhook──▶ server.ts ──▶ queue.ts ──▶ 
 | "ok" in risposta al messaggio della proposta | approva proprio quella proposta | responsabili |
 | `ripristina 12` | riporta il sito com'era prima della 12 | responsabili |
 | `ripristina 12 forza` | come sopra, anche se la pagina è stata modificata dopo | responsabili |
+| `riprova 12` | rifà da capo una commessa non riuscita o scaduta | tutti |
 | `stato 12` | a che punto è | tutti |
 | `commesse` | cosa c'è in sospeso e le ultime fatte | tutti |
 | `aiuto` | istruzioni | tutti |
@@ -167,11 +168,50 @@ Vedi [.env.example](.env.example). Le principali:
 | `WP_POST_TYPES` | tipi di contenuto modificabili, es. `post,page,viaggio` |
 | `WP_WOOCOMMERCE` | `true` per gestire i prezzi dei prodotti WooCommerce |
 | `ANTHROPIC_EFFORT` | `low`…`max`: precisione/costo dell'analisi (default `medium`) |
+| `PREFILTER_MODEL` | modello piccolo usato come filtro (es. `claude-haiku-5-5`); vuoto = spento |
+| `AI_MONTHLY_BUDGET_USD` | tetto mensile di spesa AI in dollari; 0 = nessun tetto |
+| `CLIENT_PROFILE` | scheda del cliente per l'AI |
 | `PROPOSAL_TTL_HOURS` | dopo quante ore una proposta senza ok scade (default 24) |
 | `TIMEZONE` | fuso per le date nei messaggi e per le modifiche programmate (default `Europe/Rome`) |
 | `VERIFY_PUBLIC` | `false` per non controllare la pagina pubblica dopo ogni modifica |
 | `TRANSCRIPTION_API_KEY` | chiave Groq: attiva la trascrizione dei vocali (facoltativo) |
 | `TRANSCRIPTION_URL`, `TRANSCRIPTION_MODEL` | solo per usare un servizio diverso da Groq |
+
+## Prima di partire: controllo dei collegamenti
+
+```bash
+npm run verifica
+```
+
+Controlla, senza modificare nulla, che il bot riesca a entrare in WordPress (utente, ruolo, tipi
+di contenuto, campi ACF, WooCommerce), che token e numero WhatsApp siano validi, che la chiave
+di Claude funzioni e che il servizio dei vocali risponda. Per ogni problema dice cosa sistemare.
+
+## Costi dell'AI e qualità
+
+- **Consumi registrati**: per ogni messaggio analizzato il bot salva token e costo stimato
+  (tabella dei prezzi in `src/costs.ts`). Serviranno ai report della dashboard.
+- **Tetto di spesa**: con `AI_MONTHLY_BUDGET_USD` il bot smette di analizzare i messaggi quando
+  il mese supera quella cifra (le approvazioni continuano a funzionare) e lo scrive nel log.
+- **Filtro economico**: con `PREFILTER_MODEL=claude-haiku-5-5` un modello piccolo decide se un
+  messaggio riguarda il sito prima di passarlo a quello principale. È prudente (nel dubbio
+  lascia passare) e non filtra risposte al bot, correzioni e messaggi con allegati. È spento
+  finché non lo attivate: conviene misurarlo prima con la raccolta qui sotto.
+- **Raccolta di messaggi di prova**: `evals/casi.json` contiene 26 messaggi con la risposta
+  attesa, da provare su un finto sito in memoria:
+
+  ```bash
+  npm run eval                  # tutti i casi con il modello principale
+  npm run eval -- --filtro      # misura anche il filtro economico
+  npm run eval -- --ripeti 3    # ogni caso tre volte, per vedere la stabilità
+  ```
+
+  Ogni esecuzione chiama davvero Claude: alla fine stampa quanti casi sono corretti e quanto è
+  costata. I casi di partenza sono inventati: sostituiteli man mano con messaggi veri del
+  gruppo (resi anonimi), sono quelli che contano. Va rilanciata a ogni modifica delle
+  istruzioni dell'AI, del modello o dell'impegno.
+- **Scheda del cliente**: `CLIENT_PROFILE` aggiunge alle istruzioni dell'AI chi è il cliente,
+  cosa vende, le parole ricorrenti e i campi personalizzati.
 
 ## Sviluppo
 
@@ -191,6 +231,10 @@ Struttura:
 | `src/bot.ts` | logica: comandi, commesse, approvazioni, programmazione, ripristino, ripresa |
 | `src/transcribe.ts` | trascrizione dei vocali tramite servizio esterno |
 | `src/ai.ts` | interpretazione delle richieste con Claude |
+| `src/prefilter.ts` | filtro economico con un modello piccolo |
+| `src/costs.ts` | listino dei modelli e calcolo dei costi |
+| `evals/`, `scripts/eval.ts` | messaggi di prova, sito finto e misura della qualità |
+| `scripts/verifica.ts` | controllo dei collegamenti |
 | `src/operations.ts` | le operazioni consentite sul sito |
 | `src/wordpress.ts` | REST API WordPress/WooCommerce, ripristino sicuro, verifica della pagina pubblica |
 | `src/store.ts` | database SQLite: coda, commesse, cronologia |

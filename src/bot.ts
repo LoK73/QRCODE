@@ -1,7 +1,8 @@
 import { errorMessage, IMAGE_TYPES, type Attachment, type Interpreter } from "./ai.js";
 import { parseCommand, type Command } from "./commands.js";
 import type { Operation } from "./operations.js";
-import type { ChatMessage, Commessa, CommessaStatus, Store } from "./store.js";
+import type { Prefilter } from "./prefilter.js";
+import type { AiUsage, ChatMessage, Commessa, CommessaStatus, DataStore } from "./store.js";
 import type { Transcriber } from "./transcribe.js";
 import type { IncomingMessage } from "./whatsapp.js";
 import {
@@ -39,8 +40,18 @@ export interface BotOptions {
   transcriber?: Transcriber;
   /** Foto e PDF mandati negli ultimi N minuti dalla stessa persona si considerano allegati alla richiesta. */
   mediaWindowMinutes?: number;
+  /** Filtro economico: decide se un messaggio va fatto leggere al modello principale. */
+  prefilter?: Prefilter;
+  /** Tetto mensile di spesa AI in dollari: superato quello, il bot smette di analizzare i messaggi. */
+  monthlyBudgetUsd?: number;
   /** Orologio, sostituibile nei test. */
   now?: () => Date;
+}
+
+/** Esito di un'azione chiesta dalla dashboard. */
+export interface ActionResult {
+  ok: boolean;
+  message: string;
 }
 
 type Chat = Pick<IncomingMessage, "chatId" | "chatType">;
@@ -64,7 +75,7 @@ export class Bot {
   private schedulerBusy = false;
 
   constructor(
-    private readonly store: Store,
+    private readonly store: DataStore,
     private readonly interpreter: Interpreter,
     private readonly site: SiteEditor,
     private readonly messenger: Messenger,
@@ -80,7 +91,7 @@ export class Bot {
       return;
     }
 
-    const history = this.store.recentMessages(msg.chatId).filter((m) => m.messageId !== msg.id);
+    const history = (await this.store.recentMessages(msg.chatId)).filter((m) => m.messageId !== msg.id);
 
     let text = msg.text;
     const spoken = msg.media?.kind === "audio";
@@ -90,7 +101,7 @@ export class Bot {
       text = heard;
     }
 
-    this.store.addMessage(msg.chatId, {
+    await this.store.addMessage(msg.chatId, {
       messageId: msg.id,
       from: msg.from,
       fromName: msg.fromName,
@@ -102,7 +113,7 @@ export class Bot {
 
     const command = parseCommand(text);
     if (command) {
-      const resolved = this.resolveCommand(command, msg, history);
+      const resolved = await this.resolveCommand(command, msg, history);
       if (resolved) {
         await this.handleCommand(resolved, msg);
         return;
@@ -151,7 +162,8 @@ export class Bot {
     if (!this.messenger.downloadMedia) return { attachments, notes, rowIds };
 
     const since = msg.timestamp - (this.opts.mediaWindowMinutes ?? 10) * 60;
-    for (const { rowId, media } of this.store.recentMedia(msg.chatId, msg.from, since, MAX_ATTACHMENTS)) {
+    const recent = await this.store.recentMedia(msg.chatId, msg.from, since, MAX_ATTACHMENTS);
+    for (const { rowId, media } of recent) {
       rowIds.push(rowId);
       const label = media.filename ?? (media.kind === "image" ? "foto" : "documento");
       try {
@@ -177,14 +189,29 @@ export class Bot {
 
   private async handleRequest(msg: IncomingMessage, text: string, history: ChatMessage[]): Promise<void> {
     // Messaggio già elaborato in un tentativo precedente: al massimo rimando la proposta.
-    const existing = this.store.findBySourceMessage(msg.id);
+    const existing = await this.store.findBySourceMessage(msg.id);
     if (existing) {
       if (!existing.proposalMessageId && existing.status === "in_attesa") await this.sendProposal(existing, msg);
       return;
     }
 
+    if (await this.overBudget(msg.chatId)) return;
+
+    const usages: AiUsage[] = [];
+    const onUsage = (u: AiUsage) => usages.push(u);
     const { attachments, notes, rowIds } = await this.collectAttachments(msg);
-    const pending = this.pendingFor(msg.chatId);
+    const pending = await this.pendingFor(msg.chatId);
+
+    // Il filtro economico vale solo per i messaggi "sciolti": se ci sono allegati, proposte
+    // in sospeso o l'ultimo a parlare è stato il bot, il messaggio va letto comunque.
+    const loose = attachments.length === 0 && notes.length === 0 && pending.length === 0 && !history.at(-1)?.bot;
+    if (this.opts.prefilter && loose) {
+      const relevant = await this.opts.prefilter.relevant({ text, senderName: msg.fromName, history, onUsage });
+      if (!relevant) {
+        await this.saveUsage(msg.chatId, usages);
+        return;
+      }
+    }
 
     let result;
     try {
@@ -197,22 +224,27 @@ export class Bot {
         pending: pending.map((c) => ({ id: c.id, summary: c.summary, details: c.details })),
         now: this.now(),
         timezone: this.timezone,
+        onUsage,
       });
     } catch (err) {
       console.error("[bot] errore AI:", err);
+      await this.saveUsage(msg.chatId, usages);
       await this.reply(msg, "Scusate, in questo momento non riesco a guardarci. Me lo riscrivete tra un po'?");
       return;
     }
 
-    if (result.kind !== "ignora" && rowIds.length) this.store.markMediaUsed(rowIds);
+    if (result.kind !== "ignora" && rowIds.length) await this.store.markMediaUsed(rowIds);
 
     switch (result.kind) {
       case "ignora":
+        await this.saveUsage(msg.chatId, usages);
         return;
       case "chiarimento":
+        await this.saveUsage(msg.chatId, usages);
         await this.reply(msg, result.question ?? result.summary);
         return;
       case "risposta":
+        await this.saveUsage(msg.chatId, usages);
         if (result.reply) await this.reply(msg, result.reply);
         return;
       case "commessa": {
@@ -220,9 +252,9 @@ export class Bot {
         let corrected = false;
         if (result.replaces !== undefined) {
           const old = pending.find((c) => c.id === result.replaces);
-          if (old) corrected = this.store.transition(old.id, "in_attesa", "annullata");
+          if (old) corrected = await this.store.transition(old.id, "in_attesa", "annullata");
         }
-        const commessa = this.store.createCommessa({
+        const commessa = await this.store.createCommessa({
           chatId: msg.chatId,
           chatType: msg.chatType,
           requesterId: msg.from,
@@ -235,15 +267,38 @@ export class Bot {
           applyAt: toIso(result.scheduled_for),
           revertAt: toIso(result.revert_at),
         });
+        await this.saveUsage(msg.chatId, usages, commessa.id);
         await this.sendProposal(commessa, msg, corrected);
         return;
       }
     }
   }
 
+  private async saveUsage(chatId: string, usages: AiUsage[], commessaId?: number): Promise<void> {
+    for (const u of usages) {
+      try {
+        await this.store.addUsage(chatId, u, commessaId);
+      } catch (err) {
+        console.error("[bot] impossibile registrare i consumi AI:", err);
+      }
+    }
+  }
+
+  /** true se la chat ha già speso questo mese più del tetto previsto. */
+  private async overBudget(chatId: string): Promise<boolean> {
+    const budget = this.opts.monthlyBudgetUsd;
+    if (!budget || budget <= 0) return false;
+    const now = this.now();
+    const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
+    const spent = (await this.store.usageSince(chatId, monthStart)).costUsd;
+    if (spent < budget) return false;
+    console.warn(`[bot] tetto di spesa AI raggiunto per ${chatId}: ${spent.toFixed(2)} $ su ${budget} $. Messaggio non analizzato.`);
+    return true;
+  }
+
   private async sendProposal(c: Commessa, chat: Chat, corrected = false): Promise<void> {
     const id = await this.reply(chat, formatProposal(c, { corrected, timezone: this.timezone }));
-    if (id) this.store.update(c.id, { proposalMessageId: id });
+    if (id) await this.store.update(c.id, { proposalMessageId: id });
   }
 
   // ------------------------------------------------------------ comandi
@@ -256,11 +311,11 @@ export class Bot {
    *    chi scrive può decidere.
    * Altrimenti sono normale conversazione.
    */
-  private resolveCommand(cmd: Command, msg: IncomingMessage, history: ChatMessage[]): Command | undefined {
+  private async resolveCommand(cmd: Command, msg: IncomingMessage, history: ChatMessage[]): Promise<Command | undefined> {
     if ((cmd.type !== "approve" && cmd.type !== "cancel") || !cmd.loose) return cmd;
 
     if (msg.replyTo) {
-      const target = this.store.findByProposalMessage(msg.replyTo);
+      const target = await this.store.findByProposalMessage(msg.replyTo);
       const open: CommessaStatus[] = cmd.type === "approve" ? ["in_attesa"] : ["in_attesa", "programmata"];
       if (target && target.chatId === msg.chatId && open.includes(target.status)) {
         return { ...cmd, id: target.id, loose: false };
@@ -269,7 +324,7 @@ export class Bot {
 
     const lastBot = [...history].reverse().find((m) => m.bot);
     if (!lastBot) return undefined;
-    const pending = this.pendingFor(msg.chatId);
+    const pending = await this.pendingFor(msg.chatId);
     if (!pending.some((c) => lastBot.text.includes(refTag(c.id)))) return undefined;
     if (cmd.type === "approve") return this.isApprover(msg.from) ? cmd : undefined;
     return pending.some((c) => c.requesterId === msg.from) || this.isApprover(msg.from) ? cmd : undefined;
@@ -281,10 +336,10 @@ export class Bot {
         await this.reply(msg, HELP_TEXT);
         return;
       case "list":
-        await this.reply(msg, this.formatList(msg.chatId));
+        await this.reply(msg, await this.formatList(msg.chatId));
         return;
       case "status": {
-        const c = this.findVisible(cmd.id, msg);
+        const c = await this.findVisible(cmd.id, msg);
         await this.reply(msg, c ? formatStatus(c, this.timezone) : `Non trovo niente con rif. ${cmd.id}.`);
         return;
       }
@@ -294,7 +349,25 @@ export class Bot {
         return this.cancel(cmd.id, msg);
       case "revert":
         return this.revert(cmd.id, msg, cmd.force);
+      case "retry":
+        return this.retry(cmd.id, msg);
     }
+  }
+
+  /** Rifà da capo l'analisi di una commessa non riuscita o scaduta, partendo dalla richiesta originale. */
+  private async retry(id: number, msg: IncomingMessage): Promise<void> {
+    const c = await this.findVisible(id, msg);
+    if (!c) {
+      await this.reply(msg, `Non trovo niente con rif. ${id}.`);
+      return;
+    }
+    if (this.isExpired(c)) await this.store.transition(c.id, "in_attesa", "scaduta");
+    else if (c.status !== "errore" && c.status !== "scaduta") {
+      await this.reply(msg, `Quella (rif. ${id}) non ha bisogno di essere rifatta.`);
+      return;
+    }
+    const history = (await this.store.recentMessages(msg.chatId)).filter((m) => m.messageId !== msg.id);
+    await this.handleRequest(msg, c.originalText, history);
   }
 
   private async approve(id: number | undefined, msg: IncomingMessage): Promise<void> {
@@ -302,33 +375,39 @@ export class Bot {
       await this.reply(msg, "Per questa aspetto l'ok di un responsabile prima di procedere.");
       return;
     }
-    const c = this.resolveOpen(id, msg, ["in_attesa"]);
+    const c = await this.resolveOpen(id, msg, ["in_attesa"]);
     if (typeof c === "string") {
       await this.reply(msg, c);
       return;
     }
+    const problem = await this.startApproval(c, msg.from);
+    if (problem) await this.reply(msg, problem);
+  }
 
-    // Modifica programmata: resta in attesa della sua data.
+  /**
+   * Fa partire una commessa in attesa: la applica subito oppure, se ha una
+   * data futura, la mette in programma. Restituisce un messaggio solo se non
+   * è stato possibile (qualcun altro l'ha già gestita).
+   */
+  private async startApproval(c: Commessa, approvedBy: string): Promise<string | undefined> {
     if (c.applyAt && Date.parse(c.applyAt) > this.now().getTime()) {
-      if (!this.store.transition(c.id, "in_attesa", "programmata", { approvedBy: msg.from })) {
-        await this.reply(msg, `Quella (rif. ${c.id}) è già stata gestita.`);
-        return;
+      if (!(await this.store.transition(c.id, "in_attesa", "programmata", { approvedBy }))) {
+        return `Quella (rif. ${c.id}) è già stata gestita.`;
       }
       await this.notify(c, `Ok, la metto online ${formatWhen(c.applyAt, this.timezone)} ${refTag(c.id)}.`);
-      return;
+      return undefined;
     }
-
     // Passaggio atomico in_attesa → in_corso: un secondo "ok" non riapplica la commessa.
-    if (!this.store.transition(c.id, "in_attesa", "in_corso", { approvedBy: msg.from })) {
-      await this.reply(msg, `Quella (rif. ${c.id}) è già stata gestita.`);
-      return;
+    if (!(await this.store.transition(c.id, "in_attesa", "in_corso", { approvedBy }))) {
+      return `Quella (rif. ${c.id}) è già stata gestita.`;
     }
     await this.execute(c);
+    return undefined;
   }
 
   /** Applica al sito una commessa già passata a "in_corso" e comunica l'esito. */
   private async execute(c: Commessa): Promise<void> {
-    this.store.update(c.id, { undo: [] });
+    await this.store.update(c.id, { undo: [] });
     const applied: AppliedOperation[] = [];
     try {
       for (const op of c.operations) {
@@ -338,9 +417,9 @@ export class Bot {
     } catch (err) {
       const reason = errorMessage(err);
       console.error(`[bot] errore applicando la commessa #${c.id}:`, err);
-      const recorded = this.store.get(c.id)?.undo ?? [];
+      const recorded = (await this.store.get(c.id))?.undo ?? [];
       const rollbackErrors = await this.undoAll(recorded, { force: true });
-      this.store.transition(c.id, "in_corso", "errore", { error: reason, undo: [] });
+      await this.store.transition(c.id, "in_corso", "errore", { error: reason, undo: [] });
       let text = `Non sono riuscito a fare la modifica sul sito: ${reason}`;
       if (recorded.length) {
         text += rollbackErrors.length
@@ -356,7 +435,7 @@ export class Bot {
 
     const checks = await this.verify(applied);
     const urls = [...new Set(applied.map((a) => a.url).filter(Boolean))];
-    this.store.transition(c.id, "in_corso", "completata", {
+    await this.store.transition(c.id, "in_corso", "completata", {
       resultUrls: urls,
       undo: applied.map((a) => a.undo),
     });
@@ -381,7 +460,7 @@ export class Bot {
   }
 
   private async cancel(id: number | undefined, msg: IncomingMessage): Promise<void> {
-    const c = this.resolveOpen(id, msg, ["in_attesa", "programmata"]);
+    const c = await this.resolveOpen(id, msg, ["in_attesa", "programmata"]);
     if (typeof c === "string") {
       await this.reply(msg, c);
       return;
@@ -390,7 +469,7 @@ export class Bot {
       await this.reply(msg, "Questa la può annullare chi l'ha chiesta o un responsabile.");
       return;
     }
-    if (!this.store.transition(c.id, c.status, "annullata")) {
+    if (!(await this.store.transition(c.id, c.status, "annullata"))) {
       await this.reply(msg, `Quella (rif. ${c.id}) è già stata gestita.`);
       return;
     }
@@ -402,31 +481,91 @@ export class Bot {
       await this.reply(msg, "Per tornare indietro serve l'ok di un responsabile.");
       return;
     }
-    const c = this.findVisible(id, msg);
+    const c = await this.findVisible(id, msg);
     if (!c) {
       await this.reply(msg, `Non trovo niente con rif. ${id}.`);
       return;
     }
+    const result = await this.startRevert(c, force);
+    // Gli esiti del ripristino vengono già scritti nel gruppo; qui restano solo i rifiuti immediati.
+    if (!result.ok && !result.notified) await this.reply(msg, result.message);
+  }
+
+  /** Rimette il sito com'era per una commessa completata e scrive l'esito nel gruppo. */
+  private async startRevert(c: Commessa, force: boolean): Promise<ActionResult & { notified?: boolean }> {
+    const id = c.id;
     if (c.status !== "completata") {
-      await this.reply(msg, `Quella (rif. ${id}) non è online per mano mia, non c'è niente da ripristinare.`);
-      return;
+      return { ok: false, message: `Quella (rif. ${id}) non è online per mano mia, non c'è niente da ripristinare.` };
     }
-    if (!this.store.transition(c.id, "completata", "in_ripristino")) {
-      await this.reply(msg, `Ci sto già lavorando (rif. ${id}).`);
-      return;
+    if (!(await this.store.transition(id, "completata", "in_ripristino"))) {
+      return { ok: false, message: `Ci sto già lavorando (rif. ${id}).` };
     }
     const result = await this.rollback(c, force);
+    let message: string;
     if (result.conflicts.length) {
-      await this.notify(
-        c,
+      message =
         `Non l'ho toccata: ${result.conflicts.join("; ")}. Se volete che rimetta comunque tutto com'era, ` +
-          `perdendo quelle modifiche, scrivetemi "ripristina ${id} forza".`,
-      );
+        `perdendo quelle modifiche, scrivetemi "ripristina ${id} forza".`;
     } else if (result.errors.length) {
-      await this.notify(c, `Non sono riuscito a rimettere com'era: ${result.errors.join("; ")} ${refTag(id)}`);
+      message = `Non sono riuscito a rimettere com'era: ${result.errors.join("; ")} ${refTag(id)}`;
     } else {
-      await this.notify(c, `Fatto, ho rimesso com'era prima ${refTag(id)}.`);
+      message = `Fatto, ho rimesso com'era prima ${refTag(id)}.`;
     }
+    await this.notify(c, message);
+    return { ok: !result.conflicts.length && !result.errors.length, message, notified: true };
+  }
+
+  // ------------------------------------------------------------ azioni dalla dashboard
+
+  /** Approva una commessa per conto di un utente della dashboard. L'esito viene scritto anche nel gruppo. */
+  async approveById(id: number, by: string): Promise<ActionResult> {
+    const c = await this.ownedCommessa(id);
+    if (!c) return { ok: false, message: `Commessa ${id} non trovata.` };
+    if (this.isExpired(c)) {
+      await this.store.transition(c.id, "in_attesa", "scaduta");
+      return { ok: false, message: "La proposta è scaduta: va rifatta." };
+    }
+    if (c.status !== "in_attesa") return { ok: false, message: "La commessa è già stata gestita." };
+    const problem = await this.startApproval(c, by);
+    if (problem) return { ok: false, message: problem };
+    const after = await this.store.get(id);
+    return {
+      ok: after?.status === "completata" || after?.status === "programmata",
+      message: after?.status === "errore" ? (after.error ?? "Modifica non riuscita.") : `Stato: ${after?.status}`,
+    };
+  }
+
+  /** Annulla una commessa in attesa o in programma per conto di un utente della dashboard. */
+  async cancelById(id: number): Promise<ActionResult> {
+    const c = await this.ownedCommessa(id);
+    if (!c) return { ok: false, message: `Commessa ${id} non trovata.` };
+    if (c.status !== "in_attesa" && c.status !== "programmata") {
+      return { ok: false, message: "La commessa è già stata gestita." };
+    }
+    if (!(await this.store.transition(c.id, c.status, "annullata"))) {
+      return { ok: false, message: "La commessa è già stata gestita." };
+    }
+    await this.notify(c, `Ok, lascio perdere ${refTag(c.id)}.`);
+    return { ok: true, message: "Annullata." };
+  }
+
+  /** Rimette il sito com'era per conto di un utente della dashboard. */
+  async revertById(id: number, force = false): Promise<ActionResult> {
+    const c = await this.ownedCommessa(id);
+    if (!c) return { ok: false, message: `Commessa ${id} non trovata.` };
+    const { ok, message } = await this.startRevert(c, force);
+    return { ok, message };
+  }
+
+  /** true se la commessa appartiene alle chat servite da questo bot. */
+  owns(c: Pick<Commessa, "chatId" | "chatType">): boolean {
+    if (c.chatType === "group") return this.opts.allowedGroups.includes(c.chatId);
+    return this.opts.allowedSenders.includes(c.chatId) || this.opts.approvers.includes(c.chatId);
+  }
+
+  private async ownedCommessa(id: number): Promise<Commessa | undefined> {
+    const c = await this.store.get(id);
+    return c && this.owns(c) ? c : undefined;
   }
 
   /**
@@ -449,9 +588,9 @@ export class Bot {
     if (!conflicts.length && !errors.length) errors.push(...(await this.undoAll(c.undo, { force })));
 
     if (conflicts.length || errors.length) {
-      this.store.transition(c.id, "in_ripristino", "completata");
+      await this.store.transition(c.id, "in_ripristino", "completata");
     } else {
-      this.store.transition(c.id, "in_ripristino", "ripristinata", { revertAt: null });
+      await this.store.transition(c.id, "in_ripristino", "ripristinata", { revertAt: null });
     }
     return { conflicts, errors };
   }
@@ -467,15 +606,17 @@ export class Bot {
     this.schedulerBusy = true;
     try {
       const nowIso = this.now().toISOString();
-      for (const c of this.store.dueToApply(nowIso)) {
-        if (this.store.transition(c.id, "programmata", "in_corso")) await this.execute(c);
+      for (const c of await this.store.dueToApply(nowIso)) {
+        if (!this.owns(c)) continue;
+        if (await this.store.transition(c.id, "programmata", "in_corso")) await this.execute(c);
       }
-      for (const c of this.store.dueToRevert(nowIso)) {
-        if (!this.store.transition(c.id, "completata", "in_ripristino")) continue;
+      for (const c of await this.store.dueToRevert(nowIso)) {
+        if (!this.owns(c)) continue;
+        if (!await this.store.transition(c.id, "completata", "in_ripristino")) continue;
         const result = await this.rollback(c, false);
         if (result.conflicts.length) {
           // Non riprovo all'infinito: tolgo la scadenza e lascio decidere alle persone.
-          this.store.update(c.id, { revertAt: null });
+          await this.store.update(c.id, { revertAt: null });
           await this.notify(
             c,
             `Oggi dovevo rimettere com'era la modifica ${refTag(c.id)}, ma non l'ho toccata: ${result.conflicts.join("; ")}. ` +
@@ -499,11 +640,12 @@ export class Bot {
    * rimasto in coda la riapplica da capo.
    */
   async recover(): Promise<void> {
-    for (const c of this.store.listByStatus(["in_corso"])) {
+    for (const c of await this.store.listByStatus(["in_corso"])) {
+      if (!this.owns(c)) continue;
       const errors = await this.undoAll(c.undo, { force: true });
       if (errors.length) {
         console.error(`[bot] commessa #${c.id} interrotta e non ripristinata:`, errors);
-        this.store.transition(c.id, "in_corso", "errore", { error: `Interrotta a metà: ${errors.join("; ")}` });
+        await this.store.transition(c.id, "in_corso", "errore", { error: `Interrotta a metà: ${errors.join("; ")}` });
         await this.notify(
           c,
           `Mi sono interrotto mentre aggiornavo il sito e non sono riuscito a rimettere tutto com'era: ` +
@@ -513,12 +655,13 @@ export class Bot {
       }
       // Se aveva una data ed era già approvata, la riprende lo scheduler al prossimo giro.
       const scheduled = Boolean(c.applyAt && c.approvedBy);
-      this.store.transition(c.id, "in_corso", scheduled ? "programmata" : "in_attesa", { undo: [] });
+      await this.store.transition(c.id, "in_corso", scheduled ? "programmata" : "in_attesa", { undo: [] });
       console.warn(`[bot] commessa #${c.id} interrotta da un riavvio: rimessa ${scheduled ? "in programma" : "in attesa"}`);
     }
-    for (const c of this.store.listByStatus(["in_ripristino"])) {
+    for (const c of await this.store.listByStatus(["in_ripristino"])) {
+      if (!this.owns(c)) continue;
       // I passi di ripristino si possono ripetere senza danni: basta riprovare.
-      this.store.transition(c.id, "in_ripristino", "completata");
+      await this.store.transition(c.id, "in_ripristino", "completata");
       console.warn(`[bot] ripristino della commessa #${c.id} interrotto da un riavvio: si può riprovare`);
     }
   }
@@ -553,31 +696,35 @@ export class Bot {
   }
 
   /** Proposte ancora valide in attesa di OK; quelle troppo vecchie vengono chiuse come scadute. */
-  private pendingFor(chatId: string): Commessa[] {
+  private async pendingFor(chatId: string): Promise<Commessa[]> {
     const out: Commessa[] = [];
-    for (const c of this.store.list(chatId, ["in_attesa"], 20)) {
-      if (this.isExpired(c)) this.store.transition(c.id, "in_attesa", "scaduta");
+    for (const c of await this.store.list(chatId, ["in_attesa"], 20)) {
+      if (this.isExpired(c)) await this.store.transition(c.id, "in_attesa", "scaduta");
       else out.push(c);
     }
     return out;
   }
 
-  private resolveOpen(id: number | undefined, msg: IncomingMessage, statuses: CommessaStatus[]): Commessa | string {
+  private async resolveOpen(
+    id: number | undefined,
+    msg: IncomingMessage,
+    statuses: CommessaStatus[],
+  ): Promise<Commessa | string> {
     const expired = (ref: number) =>
       `Quella proposta (rif. ${ref}) è vecchia e nel frattempo il sito può essere cambiato: ` +
       `riscrivetemi la richiesta e la preparo di nuovo.`;
     if (id !== undefined) {
-      const c = this.findVisible(id, msg);
+      const c = await this.findVisible(id, msg);
       if (!c) return `Non trovo niente con rif. ${id}.`;
       if (this.isExpired(c)) {
-        this.store.transition(c.id, "in_attesa", "scaduta");
+        await this.store.transition(c.id, "in_attesa", "scaduta");
         return expired(id);
       }
       if (c.status === "scaduta") return expired(id);
       if (!statuses.includes(c.status)) return `Quella (rif. ${id}) è già stata gestita.`;
       return c;
     }
-    const pending = this.pendingFor(msg.chatId);
+    const pending = await this.pendingFor(msg.chatId);
     if (pending.length === 0) return "Non ho niente in sospeso al momento.";
     if (pending.length > 1) {
       const refs = pending.map((p) => p.id).reverse();
@@ -587,18 +734,19 @@ export class Bot {
   }
 
   /** Una commessa è visibile nella chat in cui è nata, oppure a un responsabile ovunque. */
-  private findVisible(id: number, msg: IncomingMessage): Commessa | undefined {
-    const c = this.store.get(id);
+  private async findVisible(id: number, msg: IncomingMessage): Promise<Commessa | undefined> {
+    const c = await this.store.get(id);
     if (!c) return undefined;
     if (c.chatId === msg.chatId || this.isApprover(msg.from)) return c;
     return undefined;
   }
 
-  private formatList(chatId: string): string {
-    const open = [...this.pendingFor(chatId), ...this.store.list(chatId, ["programmata", "in_corso"])].sort(
-      (a, b) => b.id - a.id,
-    );
-    const recent = this.store.list(chatId, ["completata", "errore", "ripristinata"], 5);
+  private async formatList(chatId: string): Promise<string> {
+    const open = [
+      ...(await this.pendingFor(chatId)),
+      ...(await this.store.list(chatId, ["programmata", "in_corso"])),
+    ].sort((a, b) => b.id - a.id);
+    const recent = await this.store.list(chatId, ["completata", "errore", "ripristinata"], 5);
     if (!open.length && !recent.length) return "Per ora niente.";
     const label = (c: Commessa) =>
       c.status === "programmata" && c.applyAt
@@ -627,7 +775,7 @@ export class Bot {
 
   private async reply(chat: Chat, text: string): Promise<string | undefined> {
     const id = (await this.messenger.sendText(chat.chatId, chat.chatType, text)) || undefined;
-    this.store.addMessage(chat.chatId, {
+    await this.store.addMessage(chat.chatId, {
       messageId: id,
       from: "bot",
       text,
@@ -751,6 +899,7 @@ Per dare l'ok basta rispondere al mio messaggio. Se vi serve:
 - ok 12 → conferma
 - annulla 12 → lascia perdere
 - ripristina 12 → rimette com'era
+- riprova 12 → la rifaccio da capo se non è riuscita
 - stato 12 → a che punto è
 - commesse → cosa c'è in sospeso
 

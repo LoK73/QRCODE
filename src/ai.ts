@@ -1,8 +1,9 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { betaZodTool } from "@anthropic-ai/sdk/helpers/beta/zod";
 import { z } from "zod";
+import { sumUsage } from "./costs.js";
 import { Interpretation } from "./operations.js";
-import type { ChatMessage } from "./store.js";
+import type { AiUsage, ChatMessage } from "./store.js";
 import { WordPressClient } from "./wordpress.js";
 
 /**
@@ -40,6 +41,8 @@ export interface InterpretInput {
   pending?: PendingProposal[];
   now?: Date;
   timezone?: string;
+  /** Chiamata alla fine con i token consumati, per i report dei costi. */
+  onUsage?: (usage: AiUsage) => void;
 }
 
 export interface Interpreter {
@@ -49,13 +52,18 @@ export interface Interpreter {
 export interface ClaudeInterpreterOptions {
   model: string;
   effort: "low" | "medium" | "high" | "xhigh" | "max";
+  /**
+   * Scheda del cliente aggiunta alle istruzioni: chi è, di cosa si occupa,
+   * parole ricorrenti, campi personalizzati, regole particolari.
+   */
+  profile?: string;
   client?: Anthropic;
 }
 
 export const IMAGE_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"] as const;
 type ImageType = (typeof IMAGE_TYPES)[number];
 
-const SYSTEM_PROMPT = `Lavori con lo staff di un'agenzia di viaggi e ti occupi degli aggiornamenti del loro sito WordPress.
+const SYSTEM_PROMPT = `Lavori con lo staff di un'azienda e ti occupi degli aggiornamenti del loro sito WordPress.
 I colleghi ti scrivono in un gruppo WhatsApp: devi capire se un messaggio è una richiesta di modifica al sito e, se lo è, preparare la modifica in modo preciso. Una persona responsabile la approverà prima che venga applicata.
 
 Come lavori:
@@ -157,7 +165,15 @@ export class ClaudeInterpreter implements Interpreter {
       }),
     ];
 
-    const finalMessage = await this.client.beta.messages.toolRunner({
+    // La parte fissa delle istruzioni resta identica per tutti i clienti; la scheda del cliente va in coda.
+    const system = [
+      { type: "text" as const, text: SYSTEM_PROMPT },
+      ...(this.opts.profile?.trim()
+        ? [{ type: "text" as const, text: `<scheda_cliente>\n${this.opts.profile.trim()}\n</scheda_cliente>` }]
+        : []),
+    ];
+
+    const runner = this.client.beta.messages.toolRunner({
       model: this.opts.model,
       max_tokens: 16000,
       output_config: { effort: this.opts.effort },
@@ -165,10 +181,20 @@ export class ClaudeInterpreter implements Interpreter {
       betas: ["server-side-fallback-2026-07-01"],
       fallbacks: "default",
       max_iterations: 16,
-      system: SYSTEM_PROMPT,
+      system,
       tools,
       messages: [{ role: "user", content: buildUserContent(input) }],
     });
+
+    // Scorro le risposte una a una per sommare i consumi di tutti i passaggi.
+    const responses: Anthropic.Beta.Messages.BetaMessage[] = [];
+    try {
+      for await (const message of runner) responses.push(message);
+    } finally {
+      if (responses.length) input.onUsage?.(sumUsage(this.opts.model, "interpretazione", responses));
+    }
+    const finalMessage = responses.at(-1);
+    if (!finalMessage) throw new Error("Nessuna risposta dal modello");
 
     if (finalMessage.stop_reason === "refusal") {
       throw new Error("La richiesta è stata rifiutata dal modello");

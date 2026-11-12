@@ -1,6 +1,7 @@
 import { ClaudeInterpreter } from "./ai.js";
 import { Bot, type SiteEditor } from "./bot.js";
 import { loadConfig } from "./config.js";
+import { ClaudePrefilter } from "./prefilter.js";
 import { MessageQueue } from "./queue.js";
 import { createServer } from "./server.js";
 import { Store } from "./store.js";
@@ -29,6 +30,8 @@ const bot = new Bot(store, interpreter, site, whatsapp, {
   proposalTtlHours: config.proposalTtlHours,
   timezone: config.timezone,
   transcriber: config.transcription ? new HttpTranscriber(config.transcription) : undefined,
+  prefilter: config.anthropic.prefilterModel ? new ClaudePrefilter({ model: config.anthropic.prefilterModel }) : undefined,
+  monthlyBudgetUsd: config.anthropic.monthlyBudgetUsd,
 });
 
 if (config.allowedGroups.length === 0 && config.allowedSenders.length === 0) {
@@ -49,7 +52,7 @@ const queue = new MessageQueue(store, (msg) => bot.handle(msg));
 // Ripresa dopo un riavvio: prima le commesse rimaste a metà, poi i messaggi ancora in coda.
 store.pruneJobs();
 await bot.recover();
-const resumed = queue.resume();
+const resumed = await queue.resume();
 if (resumed > 0) console.log(`Riprendo ${resumed} messaggi rimasti in coda`);
 
 // Modifiche programmate e offerte a scadenza: controllo ogni minuto.
@@ -60,8 +63,8 @@ void tick();
 const app = createServer({
   verifyToken: config.whatsapp.verifyToken,
   appSecret: config.whatsapp.appSecret,
-  onMessage: (msg) => {
-    queue.enqueue(msg);
+  onMessage: async (msg) => {
+    await queue.enqueue(msg);
   },
 });
 

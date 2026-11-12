@@ -109,6 +109,15 @@ export class WhatsAppClient {
     return { data, mimeType };
   }
 
+  /** Verifica che token e numero siano validi; restituisce i dati del numero business. */
+  async checkConnection(): Promise<{ number?: string; name?: string; quality?: string }> {
+    const data = await this.call<{ display_phone_number?: string; verified_name?: string; quality_rating?: string }>(
+      "GET",
+      `/${this.opts.phoneNumberId}?fields=display_phone_number,verified_name,quality_rating`,
+    );
+    return { number: data.display_phone_number, name: data.verified_name, quality: data.quality_rating };
+  }
+
   /** Crea un gruppo. Il link d'invito arriva nel webhook group_lifecycle_update. */
   async createGroup(subject: string, description?: string): Promise<unknown> {
     return this.call("POST", `/${this.opts.phoneNumberId}/groups`, {

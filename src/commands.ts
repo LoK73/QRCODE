@@ -6,6 +6,7 @@
  *   annulla 12 / no 12                    → scarta la commessa 12
  *   ripristina 12                         → riporta il sito com'era prima della 12
  *   ripristina 12 forza                   → come sopra, anche se la pagina è stata modificata dopo
+ *   riprova 12                            → rifà da capo una commessa non riuscita o scaduta
  *   stato 12                              → dettagli della commessa 12
  *   commesse                              → elenco
  *   aiuto                                 → istruzioni
@@ -20,6 +21,7 @@ export type Command =
   | { type: "approve"; id?: number; loose: boolean }
   | { type: "cancel"; id?: number; loose: boolean }
   | { type: "revert"; id: number; force: boolean }
+  | { type: "retry"; id: number }
   | { type: "status"; id: number }
   | { type: "list" }
   | { type: "help" };
@@ -63,6 +65,7 @@ const PATTERNS: Array<[RegExp, (m: RegExpMatchArray) => Command]> = [
     new RegExp(String.raw`^(?:ripristina|rollback|undo)\s+${REF}(\s+(?:forza|comunque|lo stesso))?$`, "i"),
     (m) => ({ type: "revert", id: Number(m[1]), force: Boolean(m[2]) }),
   ],
+  [new RegExp(String.raw`^(?:riprova|rifai)\s+${REF}$`, "i"), (m) => ({ type: "retry", id: Number(m[1]) })],
   [new RegExp(String.raw`^(?:stato|commessa)\s+${REF}$`, "i"), (m) => ({ type: "status", id: Number(m[1]) })],
   [/^(?:commesse|lista commesse|elenco commesse)$/i, () => ({ type: "list" })],
   [/^(?:aiuto|help)$/i, () => ({ type: "help" })],

@@ -4,8 +4,8 @@ import { groupEvents, parseWebhook, verifySignature, type IncomingMessage } from
 export interface ServerOptions {
   verifyToken: string;
   appSecret: string;
-  /** Mette il messaggio in coda (in modo sincrono e durevole); l'elaborazione avviene dopo. */
-  onMessage: (msg: IncomingMessage) => void;
+  /** Mette il messaggio in coda in modo durevole; l'elaborazione vera avviene dopo. */
+  onMessage: (msg: IncomingMessage) => Promise<void>;
 }
 
 /**
@@ -33,7 +33,7 @@ export function createServer(opts: ServerOptions) {
   });
 
   // Serve il corpo grezzo per verificare la firma HMAC.
-  app.post("/webhook", express.raw({ type: "*/*", limit: "2mb" }), (req: Request, res: Response) => {
+  app.post("/webhook", express.raw({ type: "*/*", limit: "2mb" }), async (req: Request, res: Response) => {
     const raw = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
     if (!verifySignature(raw, req.header("x-hub-signature-256"), opts.appSecret)) {
       res.sendStatus(401);
@@ -55,7 +55,7 @@ export function createServer(opts: ServerOptions) {
     // Prima salviamo i messaggi, poi rispondiamo: se il salvataggio fallisce
     // Meta riceve un errore e ripete la notifica, così nulla va perso.
     try {
-      for (const msg of parseWebhook(payload)) opts.onMessage(msg);
+      for (const msg of parseWebhook(payload)) await opts.onMessage(msg);
     } catch (err) {
       console.error("[webhook] impossibile salvare i messaggi ricevuti:", err);
       res.sendStatus(500);

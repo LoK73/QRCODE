@@ -1,4 +1,4 @@
-import type { Store } from "./store.js";
+import type { DataStore } from "./store.js";
 import type { IncomingMessage } from "./whatsapp.js";
 
 export interface QueueOptions {
@@ -24,7 +24,7 @@ export class MessageQueue {
   private timers = 0;
 
   constructor(
-    private readonly store: Store,
+    private readonly store: DataStore,
     private readonly handler: (msg: IncomingMessage) => Promise<void>,
     opts: QueueOptions = {},
   ) {
@@ -32,17 +32,20 @@ export class MessageQueue {
     this.retryDelayMs = opts.retryDelayMs ?? 5000;
   }
 
-  /** Accoda un messaggio. Restituisce false se era già stato ricevuto. */
-  enqueue(msg: IncomingMessage): boolean {
-    if (!this.store.enqueue(msg)) return false;
+  /**
+   * Accoda un messaggio: quando la promessa si risolve il messaggio è salvato
+   * in modo durevole. Restituisce false se era già stato ricevuto.
+   */
+  async enqueue(msg: IncomingMessage): Promise<boolean> {
+    if (!(await this.store.enqueue(msg))) return false;
     this.schedule(msg);
     return true;
   }
 
   /** Da chiamare all'avvio: rimette in coda i messaggi interrotti e riparte. */
-  resume(): number {
-    this.store.resetInterruptedJobs();
-    const jobs = this.store.pendingJobs();
+  async resume(): Promise<number> {
+    await this.store.resetInterruptedJobs();
+    const jobs = await this.store.pendingJobs();
     for (const job of jobs) this.schedule(job.message);
     return jobs.length;
   }
@@ -65,20 +68,20 @@ export class MessageQueue {
   }
 
   private async run(msg: IncomingMessage): Promise<void> {
-    const attempt = this.store.claimJob(msg.id);
+    const attempt = await this.store.claimJob(msg.id);
     if (attempt === 0) return;
     try {
       await this.handler(msg);
-      this.store.finishJob(msg.id, "done");
+      await this.store.finishJob(msg.id, "done");
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       if (attempt >= this.maxAttempts) {
         console.error(`[coda] messaggio ${msg.id} abbandonato dopo ${attempt} tentativi:`, err);
-        this.store.finishJob(msg.id, "failed", reason);
+        await this.store.finishJob(msg.id, "failed", reason);
         return;
       }
       console.warn(`[coda] messaggio ${msg.id}: tentativo ${attempt} fallito (${reason}), riprovo`);
-      this.store.finishJob(msg.id, "pending", reason);
+      await this.store.finishJob(msg.id, "pending", reason);
       this.timers++;
       const timer = setTimeout(() => {
         this.timers--;

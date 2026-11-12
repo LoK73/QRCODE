@@ -1,6 +1,8 @@
 import type { Interpreter, InterpretInput } from "../src/ai.js";
 import type { Messenger, SiteEditor } from "../src/bot.js";
 import type { Interpretation, Operation } from "../src/operations.js";
+import type { Prefilter, PrefilterInput } from "../src/prefilter.js";
+import type { AiUsage } from "../src/store.js";
 import type { Transcriber } from "../src/transcribe.js";
 import type { IncomingMessage, MediaRef } from "../src/whatsapp.js";
 import {
@@ -67,9 +69,12 @@ export class FakeMessenger implements Messenger {
 
 export class FakeInterpreter implements Interpreter {
   calls: InterpretInput[] = [];
+  /** Consumo dichiarato a ogni chiamata (per i test sui costi). */
+  usage?: AiUsage;
   constructor(public next: Interpretation | Error) {}
   async interpret(input: InterpretInput): Promise<Interpretation> {
     this.calls.push(input);
+    if (this.usage) input.onUsage?.(this.usage);
     if (this.next instanceof Error) throw this.next;
     return this.next;
   }
@@ -110,6 +115,19 @@ export class FakeSite implements SiteEditor {
     this.checked.push(check);
     return this.publicResult;
   }
+}
+
+export class FakePrefilter implements Prefilter {
+  calls: PrefilterInput[] = [];
+  constructor(public answer: boolean) {}
+  async relevant(input: PrefilterInput): Promise<boolean> {
+    this.calls.push(input);
+    return this.answer;
+  }
+}
+
+export function usage(costUsd: number, purpose = "interpretazione"): AiUsage {
+  return { model: "claude-opus-5-5", purpose, calls: 1, inputTokens: 1000, outputTokens: 200, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd };
 }
 
 export class FakeTranscriber implements Transcriber {
