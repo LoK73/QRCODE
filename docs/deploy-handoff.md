@@ -48,6 +48,42 @@ di accesso; la pagina principale deve rimandare a `/login`.
 Per lavorare in locale: `cd dashboard && npx vercel@latest env pull .env.local` scarica le variabili
 (tranne `DATABASE_URL`, che è "sensitive" e va scritta a mano), poi `npm install && npm run dev`.
 
+## Sull'iMac: cosa far girare e cosa no
+
+Scelta fatta il 12/11/2026:
+
+- **Dashboard in locale sull'iMac: sì.** Serve per provarla e modificarla prima di ripubblicare.
+- **Bot sull'iMac: no.** Meta deve poter chiamare il bot su un indirizzo pubblico HTTPS (`/webhook`)
+  a qualsiasi ora: sull'iMac servirebbe un tunnel e il computer sempre acceso. Il bot va su un server
+  (Railway o Fly.io, dal `Dockerfile`, con il comando `npm run start:piattaforma`). Sull'iMac si può
+  comunque provare il bot finto con `npm run demo` (siti finti, nessuna chiamata esterna: vedi
+  `dashboard/README.md`).
+
+### Avvio sull'iMac
+
+Serve Node 22.13 o superiore (`node -v`).
+
+```bash
+git clone https://github.com/LoK73/QRCODE.git && cd QRCODE
+git checkout claude/happy-turing-uk5tio
+npm install && npm test                       # 146 test verdi
+npx vercel@latest login
+npx vercel@latest link --yes --project commesse-dashboard --scope lok73s-projects
+cd dashboard && npm install
+npx vercel@latest env pull .env.local         # scarica le variabili, tranne DATABASE_URL
+npm run dev                                   # http://localhost:3000
+```
+
+`DATABASE_URL` non si scarica (è "sensitive"): per la dashboard in locale collegata al database vero
+va generata una nuova password per `dashboard_app` e aggiornata sia in `.env.local` sia su Vercel,
+oppure si usa un Postgres locale come descritto in `dashboard/README.md`.
+
+### Messaggio da dare alla sessione Claude sull'iMac
+
+> Leggi `CLAUDE.md`, `docs/stato-lavori.md` e `docs/deploy-handoff.md`. Avvia la dashboard in locale
+> seguendo "Avvio sull'iMac", controlla che `/login` funzioni e poi continua dai "Prossimi passi",
+> partendo dalla connessione cifrata al database. Non mettere segreti nei commit.
+
 ## Cosa è stato verificato e cosa no
 
 - Verificato: `/login` risponde 200 con il modulo; la connessione al database con la nuova password funziona
