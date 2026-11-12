@@ -45,7 +45,7 @@ begin
   on conflict (client_id) do update set wp_app_password_enc = excluded.wp_app_password_enc, updated_at = now();
 end;
 $$;
-revoke all on function public.set_site_secret(uuid, text) from public;
+revoke all on function public.set_site_secret(uuid, text) from public, anon;
 grant execute on function public.set_site_secret(uuid, text) to authenticated;
 
 -- Dice se la password è stata inserita, senza rivelarla.
@@ -53,14 +53,14 @@ create function public.has_site_secret(cid uuid) returns boolean
 language sql stable security definer set search_path = public as $$
   select public.can_manage_client(cid) and exists (select 1 from client_secrets where client_id = cid);
 $$;
-revoke all on function public.has_site_secret(uuid) from public;
+revoke all on function public.has_site_secret(uuid) from public, anon;
 grant execute on function public.has_site_secret(uuid) to authenticated;
 
 -- Un utente non può cambiare a chi appartiene una chat o un contatto spostandoli tra clienti:
 -- le regole di scrittura controllano sia la riga di partenza sia quella di arrivo (già così),
 -- e qui si impedisce di modificare il cliente di una commessa o di un'azione già create.
 create function public.keep_client_id() returns trigger
-language plpgsql as $$
+language plpgsql set search_path = public as $$
 begin
   if new.client_id is distinct from old.client_id then
     raise exception 'Il cliente di questa riga non si può cambiare';

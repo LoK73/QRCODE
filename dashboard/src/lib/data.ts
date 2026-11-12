@@ -283,7 +283,7 @@ export async function getClient(session: Session, id: string): Promise<ClientSet
   return withUser(session.userId, async (q) => {
     const [c] = await q("select * from clients where id = $1", [id]);
     if (!c) return null;
-    const [s] = await q("select *, has_site_secret(client_id) as has_password from client_sites where client_id = $1", [id]);
+    const [s] = await q("select *, private.has_site_secret(client_id) as has_password from client_sites where client_id = $1", [id]);
     const [check] = await q(
       "select stato, esito from azioni where client_id = $1 and tipo = 'prova_sito' order by id desc limit 1",
       [id],

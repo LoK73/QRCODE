@@ -167,9 +167,9 @@ export async function saveSite(form: FormData): Promise<void> {
            verify_public = excluded.verify_public, updated_at = now()`,
         [id, url, user, types.length ? types : ["post", "page"], flag(form, "woocommerce"), flag(form, "verify_public")],
       );
-      if (encrypted) await q("select set_site_secret($1, $2)", [id, encrypted]);
+      if (encrypted) await q("select private.set_site_secret($1, $2)", [id, encrypted]);
       // Salvare e provare: il bot controlla il collegamento e scrive l'esito.
-      const [{ has }] = await q("select has_site_secret($1) as has", [id]);
+      const [{ has }] = await q("select private.has_site_secret($1) as has", [id]);
       if (has) await q("insert into azioni (client_id, tipo) values ($1, 'prova_sito')", [id]);
     });
   } catch (err) {
