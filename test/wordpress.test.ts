@@ -266,3 +266,41 @@ describe("WordPress: stesso dato in più punti", () => {
     assert.deepEqual(await wp.findOccurrences("Lisbona"), []);
   });
 });
+
+describe("WordPress: sito che non risponde", () => {
+  /** Un sito che accetta la chiamata e non risponde mai, finché non viene interrotta. */
+  const stuck = ((_input: string | URL | Request, init?: RequestInit) =>
+    new Promise<Response>((_resolve, reject) => {
+      // Il timer del tempo massimo non tiene vivo il processo: lo fa questa attesa, come una connessione vera.
+      const waiting = setInterval(() => {}, 1000);
+      init?.signal?.addEventListener("abort", () => {
+        clearInterval(waiting);
+        reject(init.signal!.reason);
+      });
+    })) as typeof fetch;
+  const options = { url: "https://agenzia.example", user: "bot", appPassword: "x", postTypes: ["page"], woocommerce: false };
+
+  it("rinuncia dopo il tempo massimo invece di restare in attesa", async () => {
+    const wp = new WordPressClient({ ...options, fetch: stuck, timeoutMs: 20 });
+    await assert.rejects(wp.search("Parigi"), /non ha risposto entro/);
+  });
+
+  it("su una scrittura avvisa che la modifica potrebbe essere passata", async () => {
+    let calls = 0;
+    const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {
+      calls++;
+      if ((init?.method ?? "GET") === "GET") {
+        const url = String(input);
+        if (url.endsWith("/wp/v2/types")) return Response.json({ page: { slug: "page", rest_base: "pages" } });
+        return Response.json({ id: 42, link: "https://agenzia.example/parigi", status: "publish", title: { raw: "Tour" }, content: { raw: "650€" }, excerpt: { raw: "" } });
+      }
+      return stuck(input, init);
+    }) as typeof fetch;
+    const wp = new WordPressClient({ ...options, fetch: fetchFn, timeoutMs: 20 });
+    await assert.rejects(
+      wp.apply({ type: "update_post", post_type: "page", id: 42, title: "Tour di Parigi" }),
+      /potrebbe essere stata applicata/,
+    );
+    assert.ok(calls >= 2);
+  });
+});

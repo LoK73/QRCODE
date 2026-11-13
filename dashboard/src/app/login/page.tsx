@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { redirect } from "next/navigation";
 import { Notice } from "@/components/ui";
 import { login } from "@/lib/actions";
@@ -7,7 +8,7 @@ import { devUsers } from "@/lib/db";
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Accedi" };
 
-export default async function LoginPage({ searchParams }: { searchParams: Promise<{ errore?: string }> }) {
+export default async function LoginPage({ searchParams }: { searchParams: Promise<{ ok?: string; errore?: string }> }) {
   if (await getSession()) redirect("/");
   const params = await searchParams;
   const dev = devAuth();
@@ -47,6 +48,7 @@ export default async function LoginPage({ searchParams }: { searchParams: Promis
               </>
             )}
             <button type="submit" className="btn primary" disabled={!configured}>Accedi</button>
+            {!dev && configured && <Link href="/recupero" className="small">Password dimenticata?</Link>}
           </form>
         </div>
       </div>

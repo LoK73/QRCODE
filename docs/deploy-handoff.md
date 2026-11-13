@@ -66,7 +66,7 @@ Serve Node 22.13 o superiore (`node -v`).
 ```bash
 git clone https://github.com/LoK73/QRCODE.git && cd QRCODE
 git checkout claude/happy-turing-uk5tio
-npm install && npm test                       # 146 test verdi
+npm install && npm test                       # 148 test verdi
 npx vercel@latest login
 npx vercel@latest link --yes --project commesse-dashboard --scope lok73s-projects
 cd dashboard && npm install
@@ -93,6 +93,8 @@ oppure si usa un Postgres locale come descritto in `dashboard/README.md`.
 ## Prossimi passi, in ordine
 
 1. Supabase → Authentication → URL Configuration: Site URL = `https://commesse-dashboard.vercel.app`.
+   Tra i Redirect URLs aggiungere `https://commesse-dashboard.vercel.app/**`, poi provare un recupero password
+   con un'email vera (le pagine `/recupero` e `/nuova-password` esistono dal 13/11/2026).
 2. Primo accesso con l'admin e giro delle pagine.
 3. Connessione cifrata al database: oggi la dashboard parla col pooler senza TLS, perché Node non riconosce
    il certificato di Supabase. Va aggiunto il certificato CA di Supabase in `dashboard/src/lib/db.ts`

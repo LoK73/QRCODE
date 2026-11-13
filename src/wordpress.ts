@@ -12,6 +12,8 @@ export interface WordPressOptions {
   postTypes: string[];
   woocommerce: boolean;
   fetch?: typeof fetch;
+  /** Tempo massimo per ogni chiamata al sito, in millisecondi (default 30 secondi). */
+  timeoutMs?: number;
 }
 
 export interface SearchResult {
@@ -186,16 +188,33 @@ export class WordPressClient {
   // ---------------------------------------------------------------- HTTP
 
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
-    const res = await this.fetchFn(`${this.opts.url}/wp-json${path}`, {
-      method,
-      headers: {
-        Authorization: this.auth,
-        Accept: "application/json",
-        ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-      },
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-    });
-    const text = await res.text();
+    // Senza un tempo massimo un sito che non risponde terrebbe fermo il bot anche per gli altri clienti.
+    const timeoutMs = this.opts.timeoutMs ?? 30_000;
+    let res: Response;
+    let text: string;
+    try {
+      res = await this.fetchFn(`${this.opts.url}/wp-json${path}`, {
+        method,
+        headers: {
+          Authorization: this.auth,
+          Accept: "application/json",
+          ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+        },
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      text = await res.text();
+    } catch (err) {
+      if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
+        const seconds = Math.round(timeoutMs / 1000);
+        throw new WordPressError(
+          method === "GET"
+            ? `Il sito non ha risposto entro ${seconds} secondi (${method} ${path}).`
+            : `Il sito non ha risposto entro ${seconds} secondi (${method} ${path}): la modifica potrebbe essere stata applicata lo stesso, conviene controllare.`,
+        );
+      }
+      throw err;
+    }
     let data: unknown = undefined;
     try {
       data = text ? JSON.parse(text) : undefined;

@@ -44,6 +44,16 @@ export async function supabaseServer() {
   });
 }
 
+/** Lunghezza minima della password scelta dalla dashboard. */
+export const MIN_PASSWORD = 10;
+
+/** L'utente di Supabase collegato, anche se non ha ancora un ruolo (es. appena invitato). */
+export async function authUser(): Promise<{ id: string; email: string } | null> {
+  if (devAuth() || !process.env.NEXT_PUBLIC_SUPABASE_URL) return null;
+  const { data } = await (await supabaseServer()).auth.getUser();
+  return data.user ? { id: data.user.id, email: data.user.email ?? "" } : null;
+}
+
 async function currentUserId(): Promise<string | null> {
   if (devAuth()) return (await cookies()).get(DEV_COOKIE)?.value ?? null;
   if (!process.env.NEXT_PUBLIC_SUPABASE_URL) return null;

@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from "next";
+import { LinkSession } from "@/components/link-session";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -20,7 +21,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;600&display=swap"
         />
       </head>
-      <body>{children}</body>
+      <body>
+        <LinkSession />
+        {children}
+      </body>
     </html>
   );
 }

@@ -1,10 +1,10 @@
 "use server";
 
 import { createClient } from "@supabase/supabase-js";
-import { cookies } from "next/headers";
+import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
-import { DEV_COOKIE, devAuth, requireSession, supabaseServer } from "./auth";
+import { authUser, DEV_COOKIE, devAuth, MIN_PASSWORD, requireSession, supabaseServer } from "./auth";
 import { withUser } from "./db";
 import { encryptSecret } from "./secrets";
 
@@ -53,6 +53,57 @@ export async function logout(): Promise<void> {
   if (devAuth()) (await cookies()).delete(DEV_COOKIE);
   else await (await supabaseServer()).auth.signOut();
   redirect("/login");
+}
+
+/** L'indirizzo pubblico della dashboard, per i link nelle email. */
+async function siteOrigin(): Promise<string> {
+  const h = await headers();
+  const host = h.get("x-forwarded-host") ?? h.get("host") ?? "";
+  const proto = h.get("x-forwarded-proto") ?? (host.startsWith("localhost") ? "http" : "https");
+  return `${proto}://${host}`;
+}
+
+/** Manda il link per scegliere una nuova password. La risposta è la stessa che l'email esista o no. */
+export async function requestPasswordReset(form: FormData): Promise<void> {
+  const email = text(form, "email").toLowerCase();
+  if (devAuth() || !process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) redirect("/login");
+  if (!email) back("/recupero", { errore: "Scrivi la tua email." });
+  // Senza PKCE: il link funziona anche se viene aperto su un altro dispositivo o browser.
+  const supabase = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY, {
+    auth: { flowType: "implicit", persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+  });
+  const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo: `${await siteOrigin()}/login` });
+  if (error?.status === 429) back("/recupero", { errore: "Troppe richieste: riprova tra qualche minuto." });
+  if (error) console.error("[recupero] invio non riuscito:", error.message);
+  back("/recupero", { ok: "Se l'indirizzo è registrato, tra poco arriva un'email con il link. Controlla anche la posta indesiderata." });
+}
+
+/** Apre la sessione con i dati arrivati da un link di invito o di recupero (vedi LinkSession). */
+export async function adoptSession(form: FormData): Promise<void> {
+  if (devAuth() || !process.env.NEXT_PUBLIC_SUPABASE_URL) redirect("/login");
+  const supabase = await supabaseServer();
+  // Un token malformato fa lanciare un errore invece di restituirlo: vale come link non valido.
+  const { error } = await supabase.auth
+    .setSession({ access_token: String(form.get("access_token") ?? ""), refresh_token: String(form.get("refresh_token") ?? "") })
+    .catch((err: unknown) => ({ error: err }));
+  if (error) back("/recupero", { errore: "Il link non è più valido: forse è scaduto o è già stato usato. Chiedine uno nuovo." });
+  redirect("/nuova-password");
+}
+
+export async function setPassword(form: FormData): Promise<void> {
+  if (!(await authUser())) redirect("/login");
+  const password = String(form.get("password") ?? "");
+  if (password.length < MIN_PASSWORD) back("/nuova-password", { errore: `La password deve avere almeno ${MIN_PASSWORD} caratteri.` });
+  if (password !== String(form.get("confirm") ?? "")) back("/nuova-password", { errore: "Le due password non coincidono." });
+  const { error } = await (await supabaseServer()).auth.updateUser({ password });
+  if (error) {
+    const same = /different from the old/i.test(error.message);
+    const weak = /weak|pwned|leaked|characters/i.test(error.message);
+    back("/nuova-password", {
+      errore: same ? "Scegli una password diversa da quella di prima." : weak ? "Password troppo debole o già comparsa in furti di dati: scegline un'altra." : "Non sono riuscito a salvare la password. Riapri il link dell'email o chiedine uno nuovo.",
+    });
+  }
+  redirect(`/?ok=${encodeURIComponent("Password salvata.")}`);
 }
 
 // ------------------------------------------------------------------ commesse
@@ -289,7 +340,7 @@ export async function addMember(form: FormData): Promise<void> {
         throw new Error("Questa persona non ha ancora un accesso. Creala in Supabase (Authentication → Users) oppure imposta SUPABASE_SERVICE_ROLE_KEY per invitarla da qui.");
       }
       const admin = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } });
-      const { data, error } = await admin.auth.admin.inviteUserByEmail(email, { data: { full_name: text(form, "name") } });
+      const { data, error } = await admin.auth.admin.inviteUserByEmail(email, { data: { full_name: text(form, "name") }, redirectTo: `${await siteOrigin()}/login` });
       if (error || !data.user) throw new Error(`Invito non riuscito: ${error?.message ?? "errore sconosciuto"}`);
       userId = data.user.id;
       invited = true;

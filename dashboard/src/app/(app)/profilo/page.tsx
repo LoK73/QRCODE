@@ -1,6 +1,7 @@
+import Link from "next/link";
 import { Notice } from "@/components/ui";
 import { saveProfile } from "@/lib/actions";
-import { requireSession, roleLabel } from "@/lib/auth";
+import { devAuth, requireSession, roleLabel } from "@/lib/auth";
 import { withUser } from "@/lib/db";
 
 export const metadata = { title: "Il mio profilo" };
@@ -33,7 +34,10 @@ export default async function ProfilePage({ searchParams }: { searchParams: Prom
                 <span className="hint" style={{ display: "block" }}>Arriva solo per i clienti di cui puoi approvare le modifiche.</span>
               </span>
             </label>
-            <div className="inline"><button type="submit" className="btn primary">Salva</button></div>
+            <div className="inline">
+              <button type="submit" className="btn primary">Salva</button>
+              {!devAuth() && <Link href="/nuova-password" className="btn">Cambia password</Link>}
+            </div>
           </form>
         </div>
       </section>
