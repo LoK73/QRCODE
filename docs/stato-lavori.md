@@ -28,6 +28,12 @@ Nota per riprendere il lavoro in una nuova sessione.
 - **Tempo massimo sulle chiamate a WordPress** (30 secondi): un sito che non risponde non tiene più
   fermo il bot per gli altri clienti.
 
+- **Pubblicazione bloccata da Vercel (13/11/2026)**: sul piano gratuito Vercel accetta solo i commit
+  il cui autore è il titolare dell'account. I commit fatti da Claude nel cloud hanno un altro autore,
+  quindi la pubblicazione del 13/11 è rimasta "BLOCKED" e online c'è ancora la versione del 12/11
+  (senza `/recupero` e `/nuova-password`). Si sblocca pubblicando dal computer del titolare, dopo un
+  commit fatto con la sua identità git, oppure collegando il repository a Vercel.
+
 ## Prossimi passi
 1. Su Supabase → Authentication → URL Configuration: Site URL = https://commesse-dashboard.vercel.app.
    Nella stessa pagina, tra i Redirect URLs, aggiungere `https://commesse-dashboard.vercel.app/**`.

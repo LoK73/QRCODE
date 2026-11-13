@@ -42,6 +42,10 @@ npm test                                      # devono essere verdi
 npx vercel@latest deploy --prod --yes         # dalla cartella principale, non da dashboard/
 ```
 
+Attenzione: sul piano gratuito Vercel blocca la pubblicazione se l'autore dell'ultimo commit non è il
+titolare dell'account (succede con i commit fatti da Claude nel cloud). Dall'iMac basta un commit fatto con
+la propria identità git prima di pubblicare. Al 13/11/2026 l'ultima versione del ramo non è ancora online.
+
 Controllo dopo la pubblicazione: `https://commesse-dashboard.vercel.app/login` deve rispondere 200 con il modulo
 di accesso; la pagina principale deve rimandare a `/login`.
 
